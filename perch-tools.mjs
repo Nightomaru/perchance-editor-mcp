@@ -131,6 +131,22 @@ export const TOOLS = [
     },
   },
   {
+    name: "perch_write_file",
+    description:
+      "Replace an entire pane's document with a LOCAL file's contents, read server-side (byte-exact). " +
+      "The large-document path: perch_write cannot carry a 2.6 MB outputTemplate through one MCP call, " +
+      "and the editor page's CSP blocks fetching it from localhost. Same dispatch as perch_write.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        pane: { ...PANE, description: "Default output" },
+        filePath: { type: "string", description: "Absolute local path to the file to load" },
+        settle: { type: "boolean", description: "Settle Yjs sync after write. Default true" },
+      },
+      required: ["filePath"],
+    },
+  },
+  {
     name: "perch_outline",
     description: "Line map of function/class/const declarations — orient in a 40k-line file without reading it all.",
     inputSchema: {
@@ -369,6 +385,7 @@ export const DISPATCH = {
   perch_edit: (a) => session.edit(a),
   perch_patch: (a) => session.patch(a),
   perch_write: (a) => session.write(a),
+  perch_write_file: (a) => session.writeFile(a),
   perch_outline: (a) => session.outline(a),
   perch_copy_lines: (a) => session.copyLines(a),
   perch_refresh: () => session.refresh(),

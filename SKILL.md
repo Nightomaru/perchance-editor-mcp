@@ -1,7 +1,7 @@
 ---
 name: perchance-editor
 description: "Use when reading, editing, or live-testing a Perchance.org generator through the perch MCP server."
-version: 2.3.2
+version: 2.3.3
 author: Nightomaru
 license: MIT
 platforms: [linux, macos, windows]
@@ -32,7 +32,7 @@ preview is the `#outputIframeEl` subframe.
 | Session | `perch_start`, `perch_status`, `perch_stop` | `perch_start` self-escalates its CF ladder; `perch_status` is 2ms — call it liberally |
 | Recovery/src | `perch_navigate`, `perch_upload_src`, `perch_delete_src` | uploads: prefer `filePath`/`url` (byte-exact, server-side) over inline `content`; binary-vs-text is CONTENT-sniffed (NUL/UTF-8), so `.onnx`-style files land byte-exact; results carry `landed`/`integrity`/`sha256`/`storeHash`/`storeSize`; deletes carry `storeConfirmed` |
 | Reading | `perch_read`, `perch_grep`, `perch_outline`, `perch_console`, `perch_errors`, `perch_snapshot` | |
-| Writing | `perch_patch` (preferred, batch), `perch_edit`, `perch_write`, `perch_copy_lines` | failed edit = `oldString not found` → grep the real text first |
+| Writing | `perch_patch` (preferred, batch), `perch_edit`, `perch_write`, `perch_write_file` (whole pane from a LOCAL file, byte-exact — the only path that carries a 2.6 MB outputTemplate; perch_write can't fit it through one MCP call and the page's CSP blocks localhost fetches), `perch_copy_lines` | failed edit = `oldString not found` → grep the real text first |
 | Preview/UI | `perch_refresh`, `perch_eval`, `perch_wait`, `perch_click`, `perch_type`, `perch_press`, `perch_set_viewport`, `perch_shot` | `perch_click`/`perch_wait` take CSS or `text=…`; `nth` picks a later match |
 
 ## Session recipe
@@ -50,12 +50,25 @@ preview is the `#outputIframeEl` subframe.
 10. perch_stop
 ```
 
+## Whole-file writes
+
+`perch_write_file {pane, filePath}` replaces a pane byte-exact from a LOCAL
+file read server-side — the only path that carries a 2.6 MB outputTemplate
+(`perch_write`'s inline content cannot fit through one MCP call, and the editor
+page's CSP blocks fetching from localhost). Use it when the working copy was
+adopted from a fresh `perch_pull` and then patched, so it already carries every
+owner edit; never write a whole pane over a room you have not re-pulled.
+Verify with the reload test (pitfall 19) plus a UTF-16 code-unit hash — JS
+`.length` counts code units, Python counts code points, so hash both sides the
+same way.
+
 ## Collab semantics
 
 With `#edit:collab=KEY`, writes go to the shared **room** live
 (`saveState: "unsaved"`), but the **public generator only updates when the
-owner saves** — `perch_pull`, `perch_list_src`, and the preview iframe keep
-showing the last saved state. Report collab edits as "live in the room,
+owner saves** — `perch_pull` and `perch_list_src` keep showing the last saved
+state. The preview iframe does NOT: it renders the CURRENT room doc, so
+`perch_refresh` → `perch_errors` is the runtime-verification loop for unsaved work. Report collab edits as "live in the room,
 pending the owner's save", never "deployed". A collab key is a credential —
 never commit or log it.
 
@@ -79,17 +92,17 @@ never commit or log it.
 ```
 perch_eval {frame:"editor", js:"JSON.stringify(window.srcState?._internals?.working ?? null)"}
 → {path: {pending, size, rev, writeTime}}
-perch_eval {frame:"editor", js:"(()=>{const m=window.yjsProvider?.doc?.share?.get('___pendingSrc___');const o={};m&&m.forEach((v,k)=>o[k]=v);return JSON.stringify(o)})()"}
-→ {path: {hash, size, rev, tabId, deleted?, committed?}}
 ```
 
-`deleted:true` = staged tombstone; a folder row renders until the owner saves
-even when everything under it is tombstoned.
+(The older `window.yjsProvider` probe is dead — that global no longer exists
+on the current editor build, same as `collabSynced`.) `deleted:true` = staged
+tombstone; a folder row renders until the owner saves even when everything
+under it is tombstoned.
 
 ## Pitfalls
 
 1. **Writes are live-synced** to every connected editor before any save. Read-only inspection is always safe; write only when asked.
-2. **A hard reload right after an edit drops it** — `perch_edit`/`perch_patch` settle Yjs by default (up to 8s); chain edits with `settle: false` and settle once at the end.
+2. **An unsettled edit drops on reload** — writes settle Yjs by default (up to 8s); chain edits with `settle: false` and settle once at the end. A settled write survives a full page reload.
 3. Editors exist before their docs populate (~15s). `totalLines: 1` + an empty line = "not synced yet", not a bug.
 4. `perch_eval` returning `""`/`0` for something obviously present = wrong frame (check the resolver's fallback chain).
 5. Two file inputs in the AI panel: `input[data-ref="fileInput"]` is the src uploader; `#aiAgentFileInputEl` attaches to the AI-helper chat and creates no src file.
@@ -105,6 +118,21 @@ even when everything under it is tombstoned.
 15. `src/` uploads never overwrite — collisions land as `name-2.ext`; pass `overwrite: true`. Delete is staged like upload (row vanishes at once, public on owner save). Binary-vs-text handling is content-sniffed, so non-text files (.onnx, images, fonts) upload byte-exact — verify via `integrity`/`storeHash` in the result.
 16. Deploy accumulated rounds as FINAL-STATE hunks against the live doc's actual text — grep the room's anchors first; replaying round-by-round diffs double-applies or fails.
 17. Perchance-AI replies require `effectiveEngine: "firefox"` (see CF playbook) — a chromium fallback means the firefox binary is missing (`npx playwright install firefox`).
+18. **`perch_start` without a collab key opens a doc that is NOT the room** — writes land
+    byte-exact in a local-only doc the owner never sees. Always pass the collab key, and re-pass it
+    after any `perch_navigate` (the session forgets it).
+19. **`collabSynced` is stale** — it reads `window.yjsProvider`, which no longer exists on the
+    current editor build, so it is always false. Real probes: `window.editorCollabInitialSyncIsPending`,
+    `window.__collabGeneration`, and the **reload test**: `perch_eval {frame:"editor", js:"location.reload()"}`
+    (the EDITOR page — pitfall 12 is about the preview iframe), wait ~40 s, re-read doc + hash.
+    If the hash survives a fresh load, the room has the write.
+20. **`perch_start {force:true}` reports `recoveryStep: "reuse"` and does not actually reload** —
+    the page keeps its old doc. Force a real reload with the eval in 19.
+21. **After any pane write: `perch_refresh`, then `perch_errors`** — the preview re-runs the
+    generator from the current doc, so runtime errors (unhandled rejections included) land in
+    `runtimeErrors`; `syntaxErrors: null` never covers them, and `perch_errors.errorView` carries
+    the editor's own error panel. When a scripted replacement swaps a code region, re-declare what
+    the old region declared — `node --check` cannot catch a dropped `var`.
 
 ## Security
 

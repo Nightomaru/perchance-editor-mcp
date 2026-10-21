@@ -177,9 +177,39 @@ class PerchSession {
           try { return window.getEditorSyntaxErrors ? window.getEditorSyntaxErrors() : null; } catch (e) { return 'err:' + e.message; }
         }).catch(() => null)
       : null;
+    // The editor surfaces generator runtime errors in its own error view (the user-facing
+    // "An error has occurred somewhere in your code" panel). Those never reach the pane syntax
+    // check and drown in console noise, so read the panel directly. Selectors are defensive:
+    // the editor build changes its DOM without notice (window.yjsProvider already vanished).
+    const errorView = this.page
+      ? await evalMain(this.page, () => {
+          try {
+            const texts = [];
+            const sels = ['.perchance-error-view', '[class*="error-view"]', '[class*="errorView"]',
+                          '[id*="error-view"]', '[id*="errorView"]', '#errorView'];
+            for (const s of sels) {
+              for (const el of document.querySelectorAll(s)) {
+                const t = String(el.innerText || '').trim();
+                if (t) texts.push(t.slice(0, 2000));
+              }
+            }
+            if (!texts.length && document.body) {
+              const re = /error (?:has )?occurred somewhere|unhandled promise rejection/i;
+              const w = document.createTreeWalker(document.body, NodeFilter.SHOW_ELEMENT);
+              let n, guard = 0;
+              while ((n = w.nextNode()) && guard++ < 3000) {
+                const t = String(n.textContent || '');
+                if (re.test(t) && t.length < 4000) { texts.push(t.replace(/\s+/g, ' ').slice(0, 2000)); break; }
+              }
+            }
+            return texts;
+          } catch (e) { return ['err:' + e.message]; }
+        }).catch(() => null)
+      : null;
     const out = {
       ok: true,
       syntaxErrors: syntax,
+      errorView: errorView && errorView.length ? errorView : null,
       runtimeErrors: this.diag.errors.slice(-50),
       consoleTail: this.diag.console.slice(-50),
       droppedConsole: this.diag.droppedConsole,
@@ -597,6 +627,32 @@ class PerchSession {
     }, { pane, content });
     if (res && res.ok && settle !== false) await this.settle();
     return res;
+  }
+
+  // write_file: same dispatch as write(), but the content is read from a LOCAL file in this
+  // server process. Exists because the large-document path has two hard walls write() hits:
+  // a 2.6 MB outputTemplate does not fit through one MCP tool call, and fetching it from the
+  // editor page is dead (perchance.org's CSP allows no connect-src to localhost). Byte-exact:
+  // the file never passes through the conversation or the page's network stack.
+  async writeFile({ pane = 'output', filePath, settle = true } = {}) {
+    if (!this.page) throw new Error('call perch_start first');
+    if (!filePath) throw new Error('filePath is required');
+    this._touch();
+    let content;
+    try {
+      content = fs.readFileSync(filePath, 'utf8');
+    } catch (e) {
+      return { ok: false, error: 'read failed: ' + String((e && e.message) || e), filePath };
+    }
+    const res = await evalMain(this.page, ({ pane, content }) => {
+      const v = pane === 'model' ? window.modelTextEditor : window.outputTemplateEditor;
+      if (!v) return { ok: false, error: 'view not ready' };
+      const before = v.state.doc.length;
+      v.dispatch({ changes: { from: 0, to: before, insert: content }, userEvent: 'input' });
+      return { ok: true, chars: content.length, lines: content.split('\n').length, before };
+    }, { pane, content });
+    if (res && res.ok && settle !== false) await this.settle();
+    return Object.assign({ filePath, bytes: Buffer.byteLength(content, 'utf8') }, res || { ok: false, error: 'dispatch failed' });
   }
 
   async patch({ changes = [], settle = true } = {}) {

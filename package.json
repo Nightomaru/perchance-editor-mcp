@@ -1,6 +1,6 @@
 {
   "name": "perch-mcp-v2",
-  "version": "2.3.2",
+  "version": "2.3.3",
   "description": "MCP v2 (2026-07-28 stateless) server: read/write control of a Perchance.org generator's live editor. Default engine: playwright firefox.",
   "type": "commonjs",
   "main": "perch-mcp.mjs",

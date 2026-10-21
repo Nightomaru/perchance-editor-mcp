@@ -29,7 +29,7 @@ const FRAME = { type: "string", enum: ["preview", "editor"] };
 
 // ----------------------------- server factory (MCP v2) -----------------------------
 function createServer() {
-  const server = new McpServer({ name: "perch", version: "2.3.1" }, { capabilities: { tools: {} } });
+  const server = new McpServer({ name: "perch", version: "2.3.3" }, { capabilities: { tools: {} } });
   for (const tool of TOOLS) {
     server.registerTool(
       tool.name,
