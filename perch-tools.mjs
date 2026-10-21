@@ -338,7 +338,7 @@ export const TOOLS = [
         content: { type: "string", description: "Inline file content — small text only; it transits the model's context (transcription risk on big/dense files). Prefer filePath or url." },
         filePath: { type: "string", description: "ABSOLUTE local path read server-side, e.g. C:/Users/you/Workspace/app/src/emoji/x.svg — byte-exact, nothing transits the conversation" },
         url: { type: "string", description: "https URL fetched server-side (e.g. a raw.githubusercontent.com file) — nothing transits the conversation" },
-        binary: { type: "boolean", description: "Force binary (base64 → real bytes page-side) or text handling. Default: inferred from the extension" },
+        binary: { type: "boolean", description: "Force binary (base64 → real bytes page-side) or text handling. Default: inferred from the CONTENT (NUL-byte + strict-UTF-8 sniff), so unknown extensions like .onnx upload byte-exact" },
         timeout: { type: "integer", description: "ms to wait for the panel's 'saved' marker. Default 25000" },
         overwrite: { type: "boolean", description: "Delete an existing file at this path first, so the upload replaces it instead of being renamed. Default false" },
       },

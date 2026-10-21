@@ -993,12 +993,22 @@ class PerchSession {
   // Resolve the upload source to exactly one of: inline content (small text only
   // — it transits the calling model's context), an absolute local filePath (read
   // server-side, byte-exact, nothing transits), or a https url (fetched
-  // server-side). Binary handling is inferred from the extension unless forced.
+  // server-side). Binary-vs-text is decided by CONTENT (NUL-byte + strict-UTF-8
+  // sniff) unless the caller forces `binary` — an extension whitelist would
+  // send unknown binary types (.onnx, .safetensors, custom blobs) down the text
+  // path, which UTF-8-expands their bytes (~1.77x) and corrupts them.
+  _looksTextual(buf) {
+    // Mirrors the editor's own looksLikeText() (srcFiles.js): a NUL byte in the
+    // first 4KiB means binary; plus a strict UTF-8 decode of the WHOLE buffer —
+    // any invalid sequence means binary. Text that survives both round-trips
+    // losslessly either way, so a false 'textual' is harmless; a false 'binary'
+    // (extension list, pre-2026-10-21) was not.
+    if (buf.subarray(0, 4096).includes(0)) return false;
+    try { new TextDecoder('utf-8', { fatal: true }).decode(buf); return true; }
+    catch (e) { return false; }
+  }
+
   _readUploadSource({ content, filePath, url, binary }) {
-    const TEXT_EXTS = ['md', 'txt', 'js', 'mjs', 'cjs', 'json', 'jsonl', 'html', 'htm', 'css', 'svg', 'xml',
-      'csv', 'ts', 'tsx', 'jsx', 'yaml', 'yml', 'toml', 'ini', 'webmanifest', 'pjs'];
-    const BINARY_EXTS = ['png', 'jpg', 'jpeg', 'gif', 'webp', 'avif', 'ico', 'bmp', 'woff', 'woff2', 'ttf',
-      'otf', 'eot', 'mp3', 'wav', 'ogg', 'm4a', 'mp4', 'webm', 'mov', 'zip', 'gz', 'tgz', 'pdf', 'wasm', 'bin', 'dat'];
     // content counts only when non-empty: the caller's cached tool schema may
     // still require a `content` argument, so `content: ""` + filePath/url is the
     // supported way to use a server-side source through an old client schema
@@ -1008,7 +1018,7 @@ class PerchSession {
     // sha256 of the exact bytes being sent, plus sha256 of what the editor's
     // UTF-8 text fallback would store — uploadSrc uses these to classify a
     // landed upload as intact ('match') vs utf8-mangled (binary corrupted by
-    // the panel's room-sync text fallback when the upload embed is blocked)
+    // a UTF-8 text round-trip)
     const { createHash } = require('crypto');
     const sha256 = (buf) => createHash('sha256').update(buf).digest('hex');
     const mangledSha256 = (buf) => createHash('sha256').update(buf.toString('utf8'), 'utf8').digest('hex');
@@ -1020,18 +1030,18 @@ class PerchSession {
       const fs = require('fs');
       if (!fs.existsSync(filePath)) return { error: 'filePath does not exist: ' + filePath };
       ext = (filePath.split('.').pop() || '').toLowerCase();
-      const isBinary = binary !== undefined ? !!binary : BINARY_EXTS.includes(ext);
       const buf = fs.readFileSync(filePath);
+      const isBinary = binary != null ? !!binary : !this._looksTextual(buf);
       if (isBinary) return { base64: buf.toString('base64'), bytes: buf.length, ext, source: 'file', sha256: sha256(buf), mangledSha256: mangledSha256(buf) };
       return { text: buf.toString('utf8'), bytes: buf.length, ext, source: 'file', sha256: sha256(buf), mangledSha256: mangledSha256(buf) };
     }
     if (url) {
       if (!/^https?:\/\//i.test(url)) return { error: 'url must start with http(s)://' };
       try { ext = (new URL(url)).pathname.split('.').pop().toLowerCase(); } catch { ext = ''; }
-      const isBinary = binary !== undefined ? !!binary : (BINARY_EXTS.includes(ext) && !TEXT_EXTS.includes(ext));
       let buf;
       try { buf = this._curlBuffer(url); } catch (e) { return { error: 'url fetch failed: ' + e.message }; }
       if (!buf || !buf.length) return { error: 'url fetch returned an empty body: ' + url };
+      const isBinary = binary != null ? !!binary : !this._looksTextual(buf);
       if (isBinary) return { base64: buf.toString('base64'), bytes: buf.length, ext, source: 'url', sha256: sha256(buf), mangledSha256: mangledSha256(buf) };
       return { text: buf.toString('utf8'), bytes: buf.length, ext, source: 'url', sha256: sha256(buf), mangledSha256: mangledSha256(buf) };
     }
@@ -1207,6 +1217,32 @@ class PerchSession {
     if (src.bytes > 64 * 1024 * 1024) return { ok: false, error: 'file too large for the panel uploader (>64MB): ' + src.bytes + ' bytes' };
     const ed = await this._frame('editor');
     if (!(await this._ensureFilesPanel(ed))) return { ok: false, error: 'could not open the files panel' };
+    // Baseline BEFORE any delete/write: what the room currently holds for this
+    // name. The wait loop below ignores entries matching this baseline — a fresh
+    // tab still sees the PREVIOUS session's published entry (old hash) until this
+    // tab's own publish lands, and a same-bytes re-upload keeps the hash and only
+    // bumps the rev, so either alone would misclassify the landing.
+    const readStoreEntry = () => evalMain(ed, ({ name }) => {
+      try {
+        const w = window.srcState && window.srcState._internals && window.srcState._internals.working;
+        const e = w ? w[name] : null;
+        let y = null;
+        try {
+          const share = window.yjsProvider && window.yjsProvider.doc && window.yjsProvider.doc.share;
+          const m = share && share.get && share.get('___pendingSrc___');
+          if (m && m.get) y = m.get(name) || null;
+        } catch (err2) { /* older editor without the registry */ }
+        const entry = y || e;
+        if (!entry) return null;
+        return {
+          deleted: !!(entry.deleted || (e && e.deleted)),
+          size: (entry.size !== undefined ? entry.size : (e ? e.size : null)),
+          hash: (y && y.hash) || null,
+          rev: entry.rev || null,
+        };
+      } catch (err) { return null; }
+    }, { name }).catch(() => null);
+    const baseline = await readStoreEntry();
     // Overwrite = delete the existing entry first (see the header comment).
     let overwrote = false;
     if (overwrite) {
@@ -1228,7 +1264,7 @@ class PerchSession {
         gif: 'image/gif', webp: 'image/webp', avif: 'image/avif', ico: 'image/x-icon',
         woff: 'font/woff', woff2: 'font/woff2', ttf: 'font/ttf', otf: 'font/otf',
         mp3: 'audio/mpeg', wav: 'audio/wav', ogg: 'audio/ogg', mp4: 'video/mp4', webm: 'video/webm',
-        zip: 'application/zip', pdf: 'application/pdf', wasm: 'application/wasm' }[ext] || 'text/plain';
+        zip: 'application/zip', pdf: 'application/pdf', wasm: 'application/wasm' }[ext] || (base64 ? 'application/octet-stream' : 'text/plain');
       let payload = content;
       if (base64) {
         const bin = atob(content);
@@ -1245,11 +1281,10 @@ class PerchSession {
     if (!r.ok) return r;
     // Wait for the upload to land. The panel's innerText "saved" marker is
     // NOT authoritative: folder-path rows render the basename only (the full
-    // path never appears in the text), and when the upload embed
-    // (upload.perchance.org) is Cloudflare-blocked the marker can never
-    // appear even though the panel's room-sync fallback DID store the file.
-    // Authoritative signal: window.srcState._internals.working[name] — the
-    // room-synced store entry carries {size, hash, rev}.
+    // path never appears in the text), and a fresh tab can show the previous
+    // session's state. Authoritative signal: the room-synced store entry —
+    // window.srcState._internals.working[name] plus the sha256-carrying
+    // ___pendingSrc___ registry entry — REFRESHED relative to the baseline.
     const t0 = Date.now();
     let saved = false;
     let renamedTo = null;
@@ -1295,8 +1330,16 @@ class PerchSession {
       }, { name }).catch(() => null);
       if (state && state.renamed) { renamedTo = state.renamed; break; }
       if (state && state.store && !state.store.deleted) {
-        storeInfo = state.store;
-        if (state.store.hash) break; // complete entry — classify integrity
+        // fresh = differs from the pre-upload baseline (rev preferred — a
+        // same-bytes re-upload keeps the hash but bumps the rev; hash fallback
+        // for builds whose entries carry no rev; neither → treat as fresh)
+        const fresh = !baseline || (state.store.rev && baseline.rev
+          ? state.store.rev !== baseline.rev
+          : (baseline.hash && state.store.hash ? state.store.hash !== baseline.hash : true));
+        if (fresh) {
+          storeInfo = state.store;
+          if (state.store.hash) break; // complete entry — classify integrity
+        }
       }
       if (state && state.txt.includes(name) && /saved/i.test(state.txt)) {
         saved = true;
@@ -1333,7 +1376,7 @@ class PerchSession {
       error: renamedTo
         ? 'the editor renamed the upload because the name already exists — it landed at ' + renamedTo + '; retry with overwrite:true to replace the original'
         : (mangled
-          ? 'landed in the editor src store but the bytes are CORRUPTED (integrity utf8-mangled): the upload embed (upload.perchance.org) was Cloudflare-blocked, so the panel fell back to UTF-8 text storage, which destroys binary files (stored ' + storeInfo.size + ' bytes vs source ' + src.bytes + '). Text files are unaffected. Fix: perch_navigate https://upload.perchance.org/embed (top-level, let the challenge clear), perch_start force:true, then re-upload.'
+          ? 'landed in the editor src store but the bytes are CORRUPTED (integrity utf8-mangled): the file went through UTF-8 text storage, which expands/corrupts binary data (stored ' + storeInfo.size + ' bytes vs source ' + src.bytes + '). Usual cause: binary:false was forced on a non-UTF-8 file. Retry with overwrite:true and no binary flag — content sniffing picks the byte-exact path.'
           : undefined),
       hint: mangled
         ? 'do not treat this file as uploaded — the staged bytes do not match the source'

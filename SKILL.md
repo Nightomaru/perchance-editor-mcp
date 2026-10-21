@@ -1,7 +1,7 @@
 ---
 name: perchance-editor
 description: "Use when reading, editing, or live-testing a Perchance.org generator through the perch MCP server."
-version: 2.3.1
+version: 2.3.2
 author: Nightomaru
 license: MIT
 platforms: [linux, macos, windows]
@@ -30,7 +30,7 @@ preview is the `#outputIframeEl` subframe.
 |---|---|---|
 | Browser-free | `perch_pull`, `perch_fetch_generator`, `perch_src`, `perch_list_src` | `perch_list_src` reflects the last OWNER save only — blind to the collab room |
 | Session | `perch_start`, `perch_status`, `perch_stop` | `perch_start` self-escalates its CF ladder; `perch_status` is 2ms — call it liberally |
-| Recovery/src | `perch_navigate`, `perch_upload_src`, `perch_delete_src` | uploads: prefer `filePath`/`url` (byte-exact, server-side) over inline `content`; results carry `landed`/`integrity`/`sha256`/`storeHash`/`storeSize`/`embedBlocked`; deletes carry `storeConfirmed` |
+| Recovery/src | `perch_navigate`, `perch_upload_src`, `perch_delete_src` | uploads: prefer `filePath`/`url` (byte-exact, server-side) over inline `content`; binary-vs-text is CONTENT-sniffed (NUL/UTF-8), so `.onnx`-style files land byte-exact; results carry `landed`/`integrity`/`sha256`/`storeHash`/`storeSize`; deletes carry `storeConfirmed` |
 | Reading | `perch_read`, `perch_grep`, `perch_outline`, `perch_console`, `perch_errors`, `perch_snapshot` | |
 | Writing | `perch_patch` (preferred, batch), `perch_edit`, `perch_write`, `perch_copy_lines` | failed edit = `oldString not found` → grep the real text first |
 | Preview/UI | `perch_refresh`, `perch_eval`, `perch_wait`, `perch_click`, `perch_type`, `perch_press`, `perch_set_viewport`, `perch_shot` | `perch_click`/`perch_wait` take CSS or `text=…`; `nth` picks a later match |
@@ -102,10 +102,9 @@ even when everything under it is tombstoned.
 12. **Never `location.reload()` the preview iframe** — a fresh cross-subdomain navigation gets CF-blocked permanently in-frame; recover with `perch_start {force:true}`. After an owner save mid-session, re-baseline: that saved state IS the new room state.
 13. Simulating collab edits in the preview: inject a `<style>` via `perch_eval`, **appended to `document.body`, not `head`** (the generator's own style blocks live in body and win specificity ties), boot at the target width (mobile/desktop mode is picked once at load), and assert with `getComputedStyle`/`getBoundingClientRect` — never report the injected render as "deployed".
 14. Chat layout traps: `#messageFeed` is a flex item — use `width: 100%`, not `margin: 0 auto`; `#inputWrapper` is abspos — cap with `max-width`, never a fixed `width`; never add `display:none !important` to buttons that `showEl/hideEl` toggle.
-15. `src/` uploads never overwrite — collisions land as `name-2.ext`; pass `overwrite: true`. Delete is staged like upload (row vanishes at once, public on owner save).
-16. **Binary uploads cannot land intact** — the intact path needs a Turnstile token from a hidden-iframe widget; automation gets `600010` → `[E-ANTIBOT]` → the panel falls back to UTF-8 text storage (binary = mojibake, e.g. 93,732 B stored as 165,640 B) and may discard the entry. Verify with `storeSize`/`storeHash` vs `bytes`/`sha256`. Text files round-trip losslessly; for true binary assets, ask the owner or use a runtime URL.
-17. Deploy accumulated rounds as FINAL-STATE hunks against the live doc's actual text — grep the room's anchors first; replaying round-by-round diffs double-applies or fails.
-18. Perchance-AI replies require `effectiveEngine: "firefox"` (see CF playbook) — a chromium fallback means the firefox binary is missing (`npx playwright install firefox`).
+15. `src/` uploads never overwrite — collisions land as `name-2.ext`; pass `overwrite: true`. Delete is staged like upload (row vanishes at once, public on owner save). Binary-vs-text handling is content-sniffed, so non-text files (.onnx, images, fonts) upload byte-exact — verify via `integrity`/`storeHash` in the result.
+16. Deploy accumulated rounds as FINAL-STATE hunks against the live doc's actual text — grep the room's anchors first; replaying round-by-round diffs double-applies or fails.
+17. Perchance-AI replies require `effectiveEngine: "firefox"` (see CF playbook) — a chromium fallback means the firefox binary is missing (`npx playwright install firefox`).
 
 ## Security
 

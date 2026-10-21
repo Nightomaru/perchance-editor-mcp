@@ -8,8 +8,8 @@ node_modules/
 perch_shot.png
 *.shot.png
 
-# local test output
-test/out/
+# test scripts are local-only, never published
+test/
 
 # os / editor noise
 .DS_Store
