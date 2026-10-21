@@ -2,7 +2,7 @@
 
 An MCP server that gives an AI agent real, bidirectional control of a
 [Perchance.org](https://perchance.org) generator: read its source, edit it,
-drive its live UI, and read its console — all through 28 tools over stdio,
+drive its live UI, and read its console — all through 29 tools over stdio,
 speaking the current MCP specification (`2026-07-28`, the stateless "v2"
 protocol).
 
@@ -11,7 +11,7 @@ Two distinct code paths, deliberately:
 | Path | Tools | Cost | Cloudflare |
 |---|---|---|---|
 | **Browser-free** | `perch_pull`, `perch_fetch_generator`, `perch_src`, `perch_list_src` | ~1s | none — uses `curl` |
-| **Live editor** | `perch_start` + the other 24 | ~2.7s start, then 1–20ms/call | mitigated |
+| **Live editor** | `perch_start` + the other 25 | ~2.7s start, then 1–20ms/call | mitigated |
 
 Reads should almost always use the browser-free path. The browser exists for
 edits, `eval`, and UI testing.
@@ -29,8 +29,6 @@ edits, `eval`, and UI testing.
 - [Quick start](#quick-start)
 - [The tool set](#the-tool-set)
 - [Security notes](#security-notes)
-- [Tests](#tests)
-- [Files](#files)
 - [Credits](#credits)
 - [License](#license)
 
@@ -61,13 +59,8 @@ Updating to a newer release: `git pull && npm install`.
 
 ### Verify the install
 
-```bash
-npm run test:core        # exercises perch-core.js directly
-npm run test:mcp         # drives the real server over stdio JSON-RPC (modern protocol)
-```
-
-Both default to the public template generator `minimal`, which needs no login
-and no collab key. See [Tests](#tests).
+Register it (below), then from any session: `perch_status` should answer in a
+few milliseconds with `running: true`.
 
 ---
 
@@ -85,7 +78,7 @@ hermes mcp add perch \
   --args "/absolute/path/to/perchance-editor-mcp/perch-mcp.mjs"
 ```
 
-Answer `y` to *"Enable all 28 tools?"*, then start a new session or run
+Answer `y` to *"Enable all 29 tools?"*, then start a new session or run
 `/reload-mcp` in an open one. Confirm with `hermes mcp test perch`. The tools
 arrive namespaced as `mcp__perch__perch_pull`, `mcp__perch__perch_start`, …
 
@@ -127,7 +120,7 @@ if you want to skip the failed handshake attempt entirely.
 
 The client must support MCP `2026-07-28` (or a modern-era SDK that negotiates
 via `server/discover`). For a legacy-handshake-only client, point it at
-`perch-mcp-legacy.mjs` instead — the same 28 tools and perch-core fixes behind
+`perch-mcp-legacy.mjs` instead — the same 29 tools and perch-core fixes behind
 the classic initialize/`tools/list`/`tools/call` flow (protocol `2025-11-25`
 and earlier; no `_meta` envelope required), shipped since tag
 [`v1.2.0`](https://github.com/Nightomaru/perchance-editor-mcp/releases/tag/v1.2.0).
@@ -148,6 +141,7 @@ outlast short ceilings.
 4. perch_status                                        # confirm docsReady
 5. perch_eval  {js: "document.title"}                  # sanity-check the frame
 6. perch_patch {changes: [...]}                        # make your edits
+   perch_write_file {pane, filePath}                    # ...or replace a whole pane byte-exact from a local file
 7. perch_errors {clear: true}                          # syntax + runtime errors
 8. perch_refresh                                       # reload preview, re-check
 9. perch_snapshot                                      # what can I click?
@@ -171,7 +165,7 @@ Full recipe, collab/publish semantics, and the Cloudflare ladder:
 
 ## The tool set
 
-28 tools. All return JSON with an `ok` boolean and an `ms` timing field.
+29 tools. All return JSON with an `ok` boolean and an `ms` timing field.
 
 | Group | Tools |
 | --- | --- |
@@ -179,7 +173,7 @@ Full recipe, collab/publish semantics, and the Cloudflare ladder:
 | **Session** | `perch_start`, `perch_status`, `perch_stop` |
 | **Recovery / src files** | `perch_navigate`, `perch_upload_src`, `perch_delete_src` |
 | **Reading** (live) | `perch_read`, `perch_grep`, `perch_outline`, `perch_console`, `perch_errors`, `perch_snapshot` |
-| **Writing** (live) | `perch_patch`, `perch_edit`, `perch_write`, `perch_copy_lines` |
+| **Writing** (live) | `perch_patch`, `perch_edit`, `perch_write`, `perch_write_file`, `perch_copy_lines` |
 | **Preview / UI** | `perch_refresh`, `perch_eval`, `perch_wait`, `perch_click`, `perch_type`, `perch_press`, `perch_set_viewport`, `perch_shot` |
 
 Per-tool purpose and arguments — plus the `perch_start` argument table — are in
@@ -198,60 +192,6 @@ Per-tool purpose and arguments — plus the `perch_start` argument table — are
 * **`perch_eval` executes arbitrary JavaScript** in a live page.
 * **This tool writes to a live, shared document.** Every write path can affect
   other connected editors in real time. Confirm intent before an edit.
-
----
-
-## Tests
-
-```bash
-npm run test:core    # test/smoke-core.mjs — perch-core.js directly
-npm run test:mcp     # test/smoke-mcp.mjs — the server over real stdio JSON-RPC
-```
-
-Both take `[generatorName] [collabKey]` and default to the public template
-`minimal`, which needs no login and no key:
-
-```bash
-node test/smoke-core.mjs                     # public template, no key
-node test/smoke-core.mjs my-generator MYKEY  # your own generator
-node test/smoke-mcp.mjs  my-generator MYKEY
-```
-
-`test:core` walks the whole feature surface: browser-free `pull`, the
-Cloudflare ladder on `start`, `status`, `eval` in both frames, `snapshot`,
-`grep` with context, `errors`, `refresh`, and a preview screenshot.
-`test:mcp` is a **modern-protocol client**: it calls `server/discover`, sends
-the required `_meta` envelope on every request, asserts that a legacy
-`initialize` is rejected with `-32022`, verifies `resultType` on results, then
-lists the tools and calls every read-only tool over the wire, writing a
-transcript to `test/out/mcp-int.log`.
-
-Run with native node and forward-slash paths — MSYS-style `/c/...` paths are
-**not** translated for native binaries on Windows. Output lands in `test/out/`
-and is gitignored.
-
----
-
-## Files
-
-```
-perchance-editor-mcp/
-├── perch-mcp.mjs        MCP server (modern 2026-07-28 stdio entry)
-├── perch-mcp-legacy.mjs optional entry: legacy initialize/tools handshake, same tools
-├── perch-tools.mjs      shared tool schemas + DISPATCH table (both entries serve this)
-├── perch-core.js        PerchSession: browser control, CF ladder, API pulls, all 28 impls
-├── SKILL.md             agent operating manual: tools, recipe, pitfalls, CF playbook
-├── package.json         deps: @modelcontextprotocol/server + node (2026-07-28), playwright (firefox default engine)
-├── LICENSE              MIT
-├── .gitignore           node_modules, .perch-mirror, test/out, screenshots
-├── test/
-│   ├── smoke-core.mjs   direct perch-core.js exercise
-│   └── smoke-mcp.mjs    server over stdio JSON-RPC (modern 2026-07-28 client)
-└── README.md
-```
-
-Generated at runtime (gitignored): `.perch-mirror/`, `test/out/`,
-`perch_shot.png`.
 
 ---
 
