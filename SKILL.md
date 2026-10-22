@@ -106,6 +106,10 @@ array overrides the order.
 | `camoufox` | Camoufox (Firefox fork, C++ fingerprint spoofing), via `camoufox-js` | **never** — the platform's editor globals (`window.outputTemplateEditor` / `window.modelTextEditor`) never publish, so docs cannot be read or written | app UI renders but its globals stay undefined too | no |
 | `patchright` | patchright's chromium (drop-in playwright fork) | **never** — clears Cloudflare headed but the editor globals never publish (waited 100 s) | boots, but no app globals | no |
 
+`camoufox` / `patchright` / `chromium` were measured HEADED — the most favourable case; neither
+publishes the globals there, so headless can only be worse. `chrome` and `firefox` were measured
+both ways.
+
 Measured on 2026-10-23 against `perchance.org/<generator>#edit:collab=…`; re-measure with
 `node test/engine-probe.cjs <generator> <collabKey> [engines] [headless|headed]` (it prints one
 JSON row per engine plus a summary; `test/` is git-ignored and local-only, so these scripts exist
