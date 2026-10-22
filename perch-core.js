@@ -78,12 +78,93 @@ function platformUaPrefix() {
   }
 }
 
+// ---------------- engines ----------------
+// One table, because a start can now walk ENGINES and not just steps: a browser that clears
+// Cloudflare can still fail to boot the generator's PREVIEW (the platform's own "file loader"
+// never arriving), and those two failures land on different engines.
+//
+//   firefox     plain playwright firefox        — default; clears perchance-subdomain CF
+//   camoufox    Camoufox (Firefox fork, C++-level fingerprint spoofing) via camoufox-js
+//   chrome      plain playwright chromium       — NO stealth args, NO init script (the control)
+//   patchright  patchright's chromium           — drop-in playwright fork, patched CDP surface
+//   chromium    playwright chromium + stealth   — the original escape hatch
+//
+// An engine must hand back a playwright-compatible Browser: this file drives pages, frames and
+// evaluate() directly. That is also why the camofox-browser REST server cannot be an engine here
+// — it exposes accessibility snapshots and clicks, not arbitrary JS in the page or its frames.
+const ENGINES = {
+  firefox:    { family: 'firefox',  stealth: false, label: 'playwright firefox' },
+  camoufox:   { family: 'camoufox', stealth: false, label: 'camoufox (firefox fork)' },
+  chrome:     { family: 'chromium', stealth: false, label: 'playwright chromium, plain' },
+  patchright: { family: 'chromium', stealth: false, label: 'patchright chromium' },
+  chromium:   { family: 'chromium', stealth: true,  label: 'playwright chromium, stealth' },
+};
+// The order a start walks when it is asked for a chain — the engines that work, first, and the two
+// measured not to, last (they are kept because they are cheap to offer and the verdicts may change
+// with a platform update; see SKILL.md for what was measured, on what, and how).
+//   firefox   the only engine that can ALSO use Perchance's server-side generation plugins
+//             (ai-text replies / uploads) — those embeds are CF-flagged on chromium
+//   chrome    plain chromium: clears CF headed, drives the editor + preview (no ai-text calls)
+//   chromium  the same with the legacy stealth args
+//   camoufox  editor globals never publish -> cannot read/write docs at all
+//   patchright  able to clear CF headed, but no editor globals either
+const ENGINE_CHAIN = ['firefox', 'chrome', 'chromium', 'camoufox', 'patchright'];
+
 const _engineCache = {};
 function loadChromium() {
   if (_engineCache.playwright) return _engineCache.playwright;
   const mod = require('playwright');
   _engineCache.playwright = { chromium: mod.chromium, firefox: mod.firefox };
   return _engineCache.playwright;
+}
+function loadPatchright() {
+  if (_engineCache.patchright) return _engineCache.patchright;
+  const mod = require('patchright');
+  _engineCache.patchright = { chromium: mod.chromium };
+  return _engineCache.patchright;
+}
+async function loadCamoufox() {
+  if (!_engineCache.camoufox) _engineCache.camoufox = await import('camoufox-js');
+  return _engineCache.camoufox;
+}
+
+// Launch one engine. `effective` is what the caller reports back; it differs from the engine key
+// only for the missing-firefox fallback (see _launch).
+async function launchEngine(name, headed, width, height) {
+  const spec = ENGINES[name];
+  if (!spec) throw new Error('unknown engine "' + name + '" (have: ' + Object.keys(ENGINES).join(', ') + ')');
+  const headless = !headed;
+  if (name === 'camoufox') {
+    // Camoufox generates a fingerprint for the requested OS and applies it at the C++ level, so
+    // nothing else may add a UA, a locale override or an init script of its own (see _newContext).
+    // `window` pins the window instead of a playwright viewport — camoufox-js cannot satisfy a
+    // viewport request while the window is pinned to a spoofed size.
+    // Do NOT pass `locale`: camoufox-js 0.13.0 crashes on it ("Cannot read properties of undefined
+    // (reading 'territoryInfo')") because its StatisticalLocaleSelector kicks off an async
+    // territoryInfo.xml load in the constructor and handleLocales() reads it synchronously. The
+    // generated fingerprint carries its own language/region, which is what we want anyway.
+    const mod = await loadCamoufox();
+    const browser = await mod.Camoufox({
+      headless,
+      os: 'windows',
+      humanize: false,
+      ...(width && height ? { window: [width, height] } : {}),
+    });
+    return { browser, engine: name, effective: 'camoufox' };
+  }
+  if (name === 'patchright') {
+    const pr = loadPatchright();
+    return { browser: await pr.chromium.launch({ headless }), engine: name, effective: 'patchright' };
+  }
+  const pw = loadChromium();
+  if (name === 'firefox') {
+    if (!pw.firefox) throw new Error('playwright firefox binary missing — run `npx playwright install firefox`');
+    return { browser: await pw.firefox.launch({ headless }), engine: name, effective: 'firefox' };
+  }
+  if (name === 'chrome') {
+    return { browser: await pw.chromium.launch({ headless }), engine: name, effective: 'chrome' };
+  }
+  return { browser: await pw.chromium.launch({ headless, args: STEALTH_ARGS }), engine: name, effective: 'chromium' };
 }
 
 function buildEditorUrl(name, collabKey) {
@@ -275,11 +356,17 @@ class PerchSession {
   }
 
   async _newContext(width, height) {
+    const running = ENGINES[this._runningEngine] || ENGINES.firefox;
+    if (running.family === 'camoufox') {
+      // Camoufox pins the window and spoofs everything below JS: a viewport request fights the
+      // pinned size, and a UA/locale/init-script of ours would contradict its fingerprint.
+      return this.browser.newContext({});
+    }
     const opts = { viewport: { width, height } };
-    if (this._runningEngine === 'firefox') {
-      // Firefox: bare context. Firefox headless UA carries no "Headless"
-      // marker and the native fingerprint is what cleared the CF challenges,
-      // so no UA/locale/JS-injection overrides.
+    if (running.family === 'firefox' || !running.stealth) {
+      // Bare context. Firefox carries no "Headless" UA marker and the native fingerprint cleared
+      // the CF challenges; plain chromium ('chrome') is here to send exactly what an ordinary
+      // browser sends, so it gets no UA rewrite, no locale override and no init script either.
       return this.browser.newContext(opts);
     }
     if (this.browser && this.headed === false) {
@@ -298,35 +385,64 @@ class PerchSession {
   }
 
   async _launch(headed, width, height) {
-    let browser;
-    if (this.engine === 'firefox') {
-      // Firefox: plain playwright firefox. Chromium-based engines (chromium and
-      // stealth forks) are Cloudflare-flagged on perchance.org SUBDOMAINS
-      // (text-generation / upload embeds sit on "Just a moment..." forever),
-      // while firefox clears those challenges headless out of the box AND
-      // initializes the perchance editor fine. Camoufox was tried and DROPPED:
-      // its fingerprint spoofing breaks the perchance editor init (the
-      // CodeMirror globals never materialize), while plain firefox clears the
-      // same challenges without any anti-detection layer.
-      let loaded = loadChromium();
-      if (!loaded.firefox) {
-        try { console.error('perch-mcp: playwright firefox binary missing — run `npx playwright install firefox`; falling back to chromium.'); } catch (e) {}
-        this.effectiveEngine = 'chromium (firefox binary unavailable)';
-        browser = await loaded.chromium.launch({ headless: !headed, args: STEALTH_ARGS });
-      } else {
-        this.effectiveEngine = 'firefox';
-        browser = await loaded.firefox.launch({ headless: !headed });
-      }
-    } else {
-      this.effectiveEngine = 'playwright';
-      const loaded = loadChromium();
-      browser = await loaded.chromium.launch({ headless: !headed, args: STEALTH_ARGS });
+    const want = this.engine || 'firefox';
+    let r;
+    try {
+      r = await launchEngine(want, headed, width, height);
+    } catch (e) {
+      // The firefox binary is installed separately from the npm package, so keep the old grace
+      // note: no binary means plain chromium rather than a failed start.
+      if (want !== 'firefox') throw e;
+      try { console.error('perch-mcp: playwright firefox unavailable (' + String((e && e.message) || e).slice(0, 140) + ') — falling back to chromium.'); } catch (e2) {}
+      r = await launchEngine('chrome', headed, width, height);
+      r.effective = 'chromium (firefox binary unavailable)';
     }
-    this._runningEngine = this.effectiveEngine === 'firefox' ? 'firefox' : 'chromium';
-    this.browser = browser;
+    this._runningEngine = r.engine;         // the engine KEY that is actually running
+    this.effectiveEngine = r.effective;     // what gets reported (differs for the fallback above)
+    this.browser = r.browser;
     this.ctx = await this._newContext(width, height);
     this._ensureIdle();
     return this.ctx;
+  }
+
+  // Make `name` the running engine: reuse it when it already is, else close what is running and
+  // launch it. This is what lets a start() walk the engine chain instead of only re-trying steps
+  // inside whichever browser it already had.
+  async _ensureEngine(name, headed, width, height) {
+    this.engine = name;
+    if (this.browser && this._runningEngine === name) return;
+    if (this.ctx) { try { await this.ctx.close(); } catch {} this.ctx = null; }
+    if (this.browser) { try { await this.browser.close(); } catch {} this.browser = null; }
+    await this._launch(headed, width, height);
+  }
+
+  // Health of the generator PREVIEW (the frame the app actually runs in).
+  //
+  // The editor page can be perfectly healthy while the preview is dead: the platform's "file
+  // loader" (root.loadDependencies, a script block of the page itself) sometimes never arrives
+  // and the app never boots — the frame then shows "This generator could not start because its
+  // file loader did not become available." Nothing used to look at the preview at all, so a
+  // start could report ok:true while every perch_eval against it pended forever. These three
+  // signals are read straight out of the frame.
+  async previewHealth() {
+    if (!this.page) return { ok: true, running: false, hint: 'not started' };
+    let frame;
+    try { frame = await this._frame('preview'); }
+    catch (e) { return { ok: true, found: false, note: 'no preview frame yet' }; }
+    try {
+      const r = await evalMain(frame, () => {
+        const errEl = document.querySelector('#perchance-src-loader-error');
+        return {
+          loaderError: !!errEl,
+          loaderErrorText: errEl ? String(errEl.textContent || '').slice(0, 220) : null,
+          booted: typeof window.getAiProvider === 'function',
+          text: String((document.body && document.body.innerText) || '').slice(0, 160),
+        };
+      });
+      return { ok: true, found: true, ...r, healthy: !!r.booted && !r.loaderError };
+    } catch (e) {
+      return { ok: true, found: true, error: String((e && e.message) || e).slice(0, 200) };
+    }
   }
 
   // Load the editor and wait until both docs are populated.
@@ -372,45 +488,64 @@ class PerchSession {
     return { docsReady: ready, cfBlocked: false, cfWaitedMs };
   }
 
-  async _openWithLadder(url, { width, height }) {
-    const ladder = [
-      { mode: 'reuse', headed: this.headed },
-      { mode: 'newctx', headed: this.headed },
-      { mode: 'relaunch', headed: this.headed },
-    ];
-    if (!this.headed) ladder.push({ mode: 'relaunch', headed: true });
-
+  // Load the editor, and hand back a preview that actually booted.
+  //
+  // Two ladders in one: the steps inside an engine (fresh context -> relaunch -> relaunch headed)
+  // and, when an engine keeps producing a dead preview, the next engine in `engines`. The engine
+  // switch is what a "file loader did not become available" preview needs — it is not a Cloudflare
+  // block and no amount of re-trying the same browser fixes it.
+  async _openWithLadder(url, { width, height, engines = null }) {
+    const chain = (Array.isArray(engines) && engines.length ? engines : [this.engine || 'firefox']).slice();
     const attempts = [];
-    for (const step of ladder) {
-      const label = step.mode + (step.headed ? '+headed' : '');
-      const t0 = Date.now();
-      try {
-        if (step.mode === 'relaunch') {
-          if (this.ctx) { try { await this.ctx.close(); } catch {} this.ctx = null; }
-          if (this.browser) { try { await this.browser.close(); } catch {} this.browser = null; }
-          this.headed = step.headed;
-          await this._launch(step.headed, width, height);
+    let lastPreview = null;
+    for (let ei = 0; ei < chain.length; ei++) {
+      const engineName = chain[ei];
+      const isLastEngine = ei === chain.length - 1;
+      const steps = [
+        { mode: 'newctx', headed: this.headed },
+        { mode: 'relaunch', headed: this.headed },
+      ];
+      if (!this.headed) steps.push({ mode: 'relaunch', headed: true });
+      for (const step of steps) {
+        const label = engineName + ':' + step.mode + (step.headed ? '+headed' : '');
+        const t0 = Date.now();
+        try {
+          if (step.mode === 'newctx' && this.browser && this._runningEngine === engineName && this.ctx) {
+            // Same engine already up: a fresh context is the cheap first move.
+            try { await this.ctx.close(); } catch {}
+            this.ctx = await this._newContext(width, height);
+          } else {
+            this.headed = step.headed;
+            await this._ensureEngine(engineName, step.headed, width, height);
+            if (!this.ctx) this.ctx = await this._newContext(width, height);
+          }
           this.page = await this.ctx.newPage();
-        } else if (step.mode === 'newctx' || !this.ctx) {
-          if (this.ctx) { try { await this.ctx.close(); } catch {} this.ctx = null; }
-          this.headed = step.headed;
-          if (!this.browser) await this._launch(step.headed, width, height);
-          else this.ctx = await this._newContext(width, height);
-          this.page = await this.ctx.newPage();
+          this._attachDiagnostics(this.page);
+          const r = await this._loadEditor(this.page, url);
+          const preview = r.docsReady ? await this.previewHealth() : null;
+          if (preview) lastPreview = preview;
+          attempts.push({
+            step: label, engine: engineName, effectiveEngine: this.effectiveEngine,
+            docsReady: r.docsReady, cfBlocked: r.cfBlocked,
+            previewBooted: preview ? !!preview.booted : null,
+            previewLoaderError: preview ? !!preview.loaderError : null,
+            ms: Date.now() - t0,
+          });
+          if (r.docsReady && preview && preview.healthy) return { ok: true, attempts, step: label, preview };
+          // Editor fine but the preview is dead: give the next engine a turn. Only the last
+          // engine keeps spending its remaining steps (there is nowhere left to go).
+          if (r.docsReady && !isLastEngine) break;
+        } catch (e) {
+          attempts.push({ step: label, engine: engineName, error: String((e && e.message) || e).slice(0, 180), ms: Date.now() - t0 });
         }
-        this._attachDiagnostics(this.page);
-        const r = await this._loadEditor(this.page, url);
-        attempts.push({ step: label, docsReady: r.docsReady, cfBlocked: r.cfBlocked, ms: Date.now() - t0 });
-        if (r.docsReady) return { ok: true, attempts, step: label };
-      } catch (e) {
-        attempts.push({ step: label, error: String((e && e.message) || e).slice(0, 180), ms: Date.now() - t0 });
       }
     }
-    return { ok: false, attempts };
+    const docsOk = attempts.some(a => a.docsReady);
+    return { ok: docsOk, attempts, degraded: docsOk, preview: lastPreview };
   }
 
   // One-shot entry: launch (if needed) + load generator + collab key.
-  async start({ name, collabKey = null, headed = false, width = 1500, height = 950, force = false, engine = null } = {}) {
+  async start({ name, collabKey = null, headed = false, width = 1500, height = 950, force = false, engine = null, engineChain = null } = {}) {
     this._touch();
     const t0 = Date.now();
     if (!name) throw new Error('missing generator name');
@@ -436,7 +571,19 @@ class PerchSession {
     }
     this.headed = !!headed;
     const url = buildEditorUrl(name, collabKey);
-    const r = await this._openWithLadder(url, { width, height });
+    // The engine chain. An explicit array wins, `false` pins the one engine, and the DEFAULT walks
+    // the recommended engines starting at the requested one — so a start that cannot load the editor,
+    // or whose preview never boots, recovers by itself instead of leaving the caller with a dead
+    // preview. A healthy start never leaves the first engine: the ladder returns as soon as the
+    // preview is healthy, so the fallbacks cost nothing in the normal case.
+    let chain = [this.engine];
+    if (Array.isArray(engineChain) && engineChain.length) {
+      chain = engineChain.slice();
+    } else if (engineChain !== false) {
+      const i = ENGINE_CHAIN.indexOf(this.engine);
+      chain = i === -1 ? [this.engine] : ENGINE_CHAIN.slice(i);
+    }
+    const r = await this._openWithLadder(url, { width, height, engines: chain });
     this.generator = name;
     this.collabKey = collabKey;
     if (!r.ok) {
@@ -451,10 +598,20 @@ class PerchSession {
     }
     const st = await this.status();
     this.ready = !!(st.hasOutputView && st.hasModelView && !st.cfBlocked);
+    const preview = r.preview || st.preview || null;
+    const previewDead = !!(preview && preview.found && !preview.healthy);
     return {
       ok: true, generator: name, collabKey, url, headed: this.headed, engine: this.engine,
       effectiveEngine: this.effectiveEngine || this.engine,
       docsReady: st.hasOutputView, recoveryStep: r.step, attempts: r.attempts, ms: Date.now() - t0,
+      engineChain: chain,
+      preview,
+      ...(previewDead ? {
+        previewDegraded: true,
+        warning: 'The editor loaded but the generator preview did not boot (' +
+          (preview.loaderError ? 'its file loader never arrived' : 'unknown reason') +
+          '). Evaluations and UI tests against the preview will hang. Re-call perch_start with engineChain:[...] to try another engine — ' + ENGINE_CHAIN.join(' / ') + '.',
+      } : {}),
       ...(this.ready ? {} : { warning: 'Editor docs not fully ready — try perch_start again.' }),
     };
   }
@@ -488,6 +645,9 @@ class PerchSession {
       result.cfBlocked = true;
       result.warning = 'Cloudflare challenge is blocking the page. Call perch_start again (it escalates automatically).';
     }
+    // The preview is the surface every perch_eval/perch_click against the running generator uses,
+    // and it can be dead while the editor is fine — report its health on every status call.
+    try { result.preview = await this.previewHealth(); } catch (e) {}
     return result;
   }
 

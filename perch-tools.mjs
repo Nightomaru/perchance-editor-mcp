@@ -16,14 +16,15 @@ export const TOOLS = [
   {
     name: "perch_start",
     description:
-      "Start the Perchance editor session: launch the browser and load the given generator with its collab key, ready to edit — one call. Handles Cloudflare automatically (4-step escalation ladder). Re-calling with the same generator/collabKey is a fast no-op. Omit collabKey for a non-collab edit (must own the generator).",
+      "Start the Perchance editor session: launch the browser and load the given generator with its collab key, ready to edit — one call. Handles Cloudflare automatically (steps inside an engine, then the next engine in engineChain). Re-calling with the same generator/collabKey is a fast no-op. Omit collabKey for a non-collab edit (must own the generator). Reports the PREVIEW's health too: the editor page can be fine while the generator frame never boots ('This generator could not start because its file loader did not become available') — in that case the ladder has already tried the other engines, and the result says previewDegraded.",
     inputSchema: {
       type: "object",
       properties: {
         name: { type: "string", description: "Generator name, e.g. 'minimal'" },
         collabKey: { type: "string", description: "Collab key from the editor URL hash (#edit:collab=KEY)" },
-        headed: { type: "boolean", description: "Show a visible browser window. Default false" },
-        engine: { type: "string", enum: ["firefox", "chromium"], description: "Browser engine. 'firefox' = plain playwright firefox (DEFAULT; clears Cloudflare on perchance.org subdomains where chromium is flagged; falls back to chromium when the firefox binary is absent). 'chromium' = plain playwright chromium escape hatch" },
+        headed: { type: "boolean", description: "Show a visible browser window. Default false. Chromium-family engines cannot clear Cloudflare headless, so they only work with headed:true" },
+        engine: { type: "string", enum: ["firefox", "chrome", "chromium", "camoufox", "patchright"], description: "Browser engine to start with. 'firefox' (DEFAULT) = plain playwright firefox: the only engine that clears Cloudflare on perchance.org subdomains AND the only one that can use Perchance's server-side generation plugins (ai-text replies, src uploads). 'chrome' = plain playwright chromium (no stealth): drives the editor and the preview when headed:true, but cannot reach the ai-text/upload embeds. 'chromium' = the same plus the legacy stealth args. 'camoufox' = Camoufox (Firefox fork, C++ fingerprint spoofing): measured NOT usable — the platform's editor globals (window.outputTemplateEditor / window.modelTextEditor) never publish, so docs cannot be read or written. 'patchright' = patched-playwright chromium: clears Cloudflare headed, but no editor globals either." },
+        engineChain: { type: "array", items: { type: "string", enum: ["firefox", "chrome", "chromium", "camoufox", "patchright"] }, description: "Engines to try IN ORDER when one cannot load the editor or its preview. Default: the recommended chain starting at `engine` (firefox -> chrome -> chromium -> camoufox -> patchright). Pass [\"firefox\"] (or false) to pin one engine and never switch." },
         width: { type: "integer", description: "Viewport width. Default 1500" },
         height: { type: "integer", description: "Viewport height. Default 950" },
         force: { type: "boolean", description: "Reload even if already on this generator" },
@@ -33,7 +34,7 @@ export const TOOLS = [
   },
   {
     name: "perch_status",
-    description: "Report live editor state: save state, syntax errors, collab sync, line counts, engine, CF status, buffered console/error counts.",
+    description: "Report live editor state: save state, syntax errors, collab sync, line counts, engine, CF status, buffered console/error counts, and the preview's health (preview.booted / preview.loaderError). preview.loaderError true means the generator frame reported 'its file loader did not become available' - the app never booted there, so every perch_eval/perch_click against the preview will hang. Fix: perch_start again (fresh context), then a different engine via engineChain.",
     inputSchema: { type: "object", properties: {}, required: [] },
   },
   {

@@ -16,8 +16,9 @@ metadata:
 Reads are browser-free: `perch_pull` mirrors `main.pjs` + `index.html` locally
 in ~1s — grep those files, never `perch_grep` a 40k-line doc in-browser. The
 browser (`perch_start`) exists for edits, `eval`, and UI testing. Engine
-default: firefox (plain playwright firefox) — it clears Cloudflare on
-perchance.org subdomains where chromium engines are flagged. Prefer
+default: firefox (plain playwright firefox) — the only engine that clears
+Cloudflare on the perchance subdomains AND the only one that works headless
+(see **Engines** below; pick another only with a reason). Prefer
 `headed: true` for interactive sessions (the user can watch; don't minimize
 the window). `main.pjs` is the Perchance DSL, **not** JavaScript — only
 `index.html` is `node --check`-able. Tools are client-namespaced
@@ -29,7 +30,7 @@ preview is the `#outputIframeEl` subframe.
 | Group | Tools | Key quirks |
 |---|---|---|
 | Browser-free | `perch_pull`, `perch_fetch_generator`, `perch_src`, `perch_list_src` | `perch_list_src` reflects the last OWNER save only — blind to the collab room |
-| Session | `perch_start`, `perch_status`, `perch_stop` | `perch_start` self-escalates its CF ladder; `perch_status` is 2ms — call it liberally |
+| Session | `perch_start`, `perch_status`, `perch_stop` | `perch_start` self-escalates (steps inside an engine, then the next engine in `engineChain`); `perch_status` reports `preview.booted` / `preview.loaderError` and is ~2ms — call it liberally |
 | Recovery/src | `perch_navigate`, `perch_upload_src`, `perch_delete_src` | uploads: prefer `filePath`/`url` (byte-exact, server-side) over inline `content`; binary-vs-text is CONTENT-sniffed (NUL/UTF-8), so `.onnx`-style files land byte-exact; results carry `landed`/`integrity`/`sha256`/`storeHash`/`storeSize`; deletes carry `storeConfirmed` |
 | Reading | `perch_read`, `perch_grep`, `perch_outline`, `perch_console`, `perch_errors`, `perch_snapshot` | |
 | Writing | `perch_patch` (preferred, batch), `perch_edit`, `perch_write`, `perch_write_file` (whole pane from a LOCAL file, byte-exact — the only path that carries a 2.6 MB outputTemplate; perch_write can't fit it through one MCP call and the page's CSP blocks localhost fetches), `perch_copy_lines` | failed edit = `oldString not found` → grep the real text first |
@@ -67,8 +68,12 @@ same way.
 With `#edit:collab=KEY`, writes go to the shared **room** live
 (`saveState: "unsaved"`), but the **public generator only updates when the
 owner saves** — `perch_pull` and `perch_list_src` keep showing the last saved
-state. The preview iframe does NOT: it renders the CURRENT room doc, so
-`perch_refresh` → `perch_errors` is the runtime-verification loop for unsaved work. Report collab edits as "live in the room,
+state. **The preview iframe may NOT be running the room doc** — measured 2026-10-23: after a
+whole-pane `perch_write_file` (the editor pane showed the new bytes and the reload test passed), the
+preview kept executing the previously SAVED generator, so `perch_refresh` → `perch_errors` reported
+nothing about the change. Before trusting a preview observation after a write, probe a global from
+your own change (`perch_eval {frame:"preview", js:"typeof window.<yourNewHelper>"}`) — absent means
+you are looking at the saved generator, not your edit. Report collab edits as "live in the room,
 pending the owner's save", never "deployed". A collab key is a credential —
 never commit or log it.
 
@@ -84,6 +89,51 @@ never commit or log it.
   forever; `engine: "chromium"` is a debugging escape hatch only.
 - `SyntaxError: Unexpected token '<'` after a 403 on perchance APIs is CF
   noise, not a generator bug.
+
+## Engines
+
+`perch_start` takes `engine` (which browser to start with) and `engineChain` (which to try in
+order when one cannot load the editor or its preview). The default chain walks
+`firefox → chrome → chromium → camoufox → patchright` starting at the requested engine, and a
+healthy start never leaves the first engine. `engineChain: false` pins one engine; an explicit
+array overrides the order.
+
+| engine | what it is | editor docs | preview | Perchance AI replies |
+|---|---|---|---|---|
+| `firefox` **(default)** | plain playwright firefox | works headless and headed | boots | works headless — the only proven one |
+| `chrome` | plain playwright chromium, no stealth | **headed only** (headless sits on "Just a moment…" forever) | boots | worked headed in a measured round trip, but chromium is CF-flagged on the perchance subdomains in general — treat as best-effort |
+| `chromium` | chromium + the legacy stealth launch args | headed only | boots | same caveat |
+| `camoufox` | Camoufox (Firefox fork, C++ fingerprint spoofing), via `camoufox-js` | **never** — the platform's editor globals (`window.outputTemplateEditor` / `window.modelTextEditor`) never publish, so docs cannot be read or written | app UI renders but its globals stay undefined too | no |
+| `patchright` | patchright's chromium (drop-in playwright fork) | **never** — clears Cloudflare headed but the editor globals never publish (waited 100 s) | boots, but no app globals | no |
+
+Measured on 2026-10-23 against `perchance.org/<generator>#edit:collab=…`; re-measure with
+`node test/engine-probe.cjs <generator> <collabKey> [engines] [headless|headed]` (it prints one
+JSON row per engine plus a summary; `test/` is git-ignored and local-only, so these scripts exist
+in a working checkout but are not in the published repo). The ladder's own logic is covered by
+`node test/ladder-unit.cjs`, and `node test/reply-roundtrip.cjs …` drives a real reply and reports
+the captured `aiTextPlugin` payload, the stored message and its reasoning.
+
+**Only plain Firefox can be relied on for Perchance's server-side generation plugins** — the
+ai-text and upload embeds. Chromium-family engines are Cloudflare-flagged on those subdomains
+(headless always; headed sometimes clears), and camoufox/patchright cannot drive the editor at all,
+so nothing that needs the generation plugins (AI replies, `perch_upload_src`) has a working
+fallback. Use them for editor work only, and expect uploads/replies to fail there.
+
+**"This generator could not start because its file loader did not become available."** in the
+preview frame means the platform's own dependency loader never arrived — the app did not boot, so
+every `perch_eval`/`perch_click`/`perch_wait` against the preview will hang or time out, while the
+editor itself looks perfectly healthy. Recovery, in order:
+
+1. **Restart once** — `perch_start {force: true}` (a fresh context usually clears it; it is not a
+   Cloudflare block, so waiting does not help).
+2. **Switch engine** — `perch_start {engine: "chrome", headed: true}` (or pass an explicit
+   `engineChain`). `perch_status.preview.loaderError === true` is the signal, and `perch_start`
+   now reports `previewDegraded: true` with the chain it already tried.
+
+Camoufox note: `camoufox-js` 0.13.0 crashes when the launch options carry `locale`
+(`Cannot read properties of undefined (reading 'territoryInfo')` — its `StatisticalLocaleSelector`
+starts an async `territoryInfo.xml` load in the constructor and `handleLocales()` reads it
+synchronously). Launch it without `locale`; the generated fingerprint brings its own.
 
 ## Verifying staged src state (pre-save)
 
@@ -117,7 +167,7 @@ under it is tombstoned.
 14. Chat layout traps: `#messageFeed` is a flex item — use `width: 100%`, not `margin: 0 auto`; `#inputWrapper` is abspos — cap with `max-width`, never a fixed `width`; never add `display:none !important` to buttons that `showEl/hideEl` toggle.
 15. `src/` uploads never overwrite — collisions land as `name-2.ext`; pass `overwrite: true`. Delete is staged like upload (row vanishes at once, public on owner save). Binary-vs-text handling is content-sniffed, so non-text files (.onnx, images, fonts) upload byte-exact — verify via `integrity`/`storeHash` in the result.
 16. Deploy accumulated rounds as FINAL-STATE hunks against the live doc's actual text — grep the room's anchors first; replaying round-by-round diffs double-applies or fails.
-17. Perchance-AI replies require `effectiveEngine: "firefox"` (see CF playbook) — a chromium fallback means the firefox binary is missing (`npx playwright install firefox`).
+17. Perchance-AI replies hang with no error on an engine that cannot clear Cloudflare on the perchance subdomains (see **Engines**). Firefox does it headless; chromium-family needs `headed:true` and is still best-effort. A `effectiveEngine` that is not what you asked for means the fallback fired — the start result (`attempts`, `engineChain`) says why.
 18. **`perch_start` without a collab key opens a doc that is NOT the room** — writes land
     byte-exact in a local-only doc the owner never sees. Always pass the collab key, and re-pass it
     after any `perch_navigate` (the session forgets it).

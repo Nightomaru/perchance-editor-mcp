@@ -49,11 +49,22 @@ npx playwright install chromium     # only for the chromium fallback (optional)
 
 `npm install` pulls `@modelcontextprotocol/server` + `@modelcontextprotocol/node`
 (the MCP `2026-07-28` SDK) and `playwright`. The DEFAULT browser engine is
-**playwright firefox** — it clears Cloudflare on perchance.org *subdomains*
-(where chromium-based engines, including stealth forks, are flagged), and the
-perchance editor initializes on it cleanly. If the firefox binary is missing,
-the session falls back to chromium and reports it via `effectiveEngine`
-(never silently).
+**playwright firefox** — the only engine that clears Cloudflare on perchance.org
+*subdomains* (where chromium-based engines are flagged), the only one that works
+headless, and the only one with a working path to Perchance's server-side
+generation plugins (AI replies, src uploads). If the firefox binary is missing,
+the session falls back to chromium and reports it via `effectiveEngine` (never
+silently).
+
+`perch_start` also takes `engine` and `engineChain` — pick the browser it starts
+with, and the engines to try in order when one cannot load the editor or its
+preview (the generator frame failing with *"its file loader did not become
+available"*). Firefox stays the default; `chrome`/`chromium` can drive the editor
+**headed only**, and `camoufox`/`patchright` are offered but measured not to
+publish the editor's globals at all. `camoufox-js` and `patchright` are
+`optionalDependencies`, so the base install stays light and an engine that is not
+installed simply fails over to the next one. The measured capability matrix and
+the recovery steps are in `SKILL.md`.
 
 Updating to a newer release: `git pull && npm install`.
 
