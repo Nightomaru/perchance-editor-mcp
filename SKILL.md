@@ -1,7 +1,7 @@
 ---
 name: perchance-editor
 description: "Use when reading, editing, or live-testing a Perchance.org generator through the perch MCP server."
-version: 2.3.3
+version: 2.3.4
 author: Nightomaru
 license: MIT
 platforms: [linux, macos, windows]
