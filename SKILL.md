@@ -111,7 +111,9 @@ Measured on 2026-10-23 against `perchance.org/<generator>#edit:collab=…`; re-m
 JSON row per engine plus a summary; `test/` is git-ignored and local-only, so these scripts exist
 in a working checkout but are not in the published repo). The ladder's own logic is covered by
 `node test/ladder-unit.cjs`, and `node test/reply-roundtrip.cjs …` drives a real reply and reports
-the captured `aiTextPlugin` payload, the stored message and its reasoning.
+the captured `aiTextPlugin` payload, the stored message and its reasoning. Run these in the
+FOREGROUND: a harness that backgrounds them behind a closed stdin can kill the browser launch
+instantly (`stdin is not a tty`, exit 1) and look like a test failure.
 
 **Only plain Firefox can be relied on for Perchance's server-side generation plugins** — the
 ai-text and upload embeds. Chromium-family engines are Cloudflare-flagged on those subdomains
