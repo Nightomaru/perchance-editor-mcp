@@ -1,7 +1,7 @@
 {
   "name": "perch-mcp-v2",
-  "version": "2.3.4",
-  "description": "MCP v2 (2026-07-28 stateless) server: read/write control of a Perchance.org generator's live editor. Default engine: playwright firefox; optional camoufox / chromium / patchright fallbacks.",
+  "version": "2.4.0",
+  "description": "MCP v2 (2026-07-28 stateless) server: read/write control of a Perchance.org generator's live editor. Default engine: playwright firefox; optional chromium / patchright fallbacks.",
   "type": "commonjs",
   "main": "perch-mcp.mjs",
   "license": "MIT",
@@ -22,7 +22,6 @@
     "playwright": "^1.64.0"
   },
   "optionalDependencies": {
-    "camoufox-js": "^0.13.0",
     "patchright": "^1.64.1"
   }
 }

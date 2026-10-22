@@ -84,7 +84,6 @@ function platformUaPrefix() {
 // never arriving), and those two failures land on different engines.
 //
 //   firefox     plain playwright firefox        — default; clears perchance-subdomain CF
-//   camoufox    Camoufox (Firefox fork, C++-level fingerprint spoofing) via camoufox-js
 //   chrome      plain playwright chromium       — NO stealth args, NO init script (the control)
 //   patchright  patchright's chromium           — drop-in playwright fork, patched CDP surface
 //   chromium    playwright chromium + stealth   — the original escape hatch
@@ -94,21 +93,20 @@ function platformUaPrefix() {
 // — it exposes accessibility snapshots and clicks, not arbitrary JS in the page or its frames.
 const ENGINES = {
   firefox:    { family: 'firefox',  stealth: false, label: 'playwright firefox' },
-  camoufox:   { family: 'camoufox', stealth: false, label: 'camoufox (firefox fork)' },
   chrome:     { family: 'chromium', stealth: false, label: 'playwright chromium, plain' },
   patchright: { family: 'chromium', stealth: false, label: 'patchright chromium' },
   chromium:   { family: 'chromium', stealth: true,  label: 'playwright chromium, stealth' },
 };
-// The order a start walks when it is asked for a chain — the engines that work, first, and the two
-// measured not to, last (they are kept because they are cheap to offer and the verdicts may change
-// with a platform update; see SKILL.md for what was measured, on what, and how).
-//   firefox   the only engine that can ALSO use Perchance's server-side generation plugins
-//             (ai-text replies / uploads) — those embeds are CF-flagged on chromium
-//   chrome    plain chromium: clears CF headed, drives the editor + preview (no ai-text calls)
-//   chromium  the same with the legacy stealth args
-//   camoufox  editor globals never publish -> cannot read/write docs at all
-//   patchright  able to clear CF headed, but no editor globals either
-const ENGINE_CHAIN = ['firefox', 'chrome', 'chromium', 'camoufox', 'patchright'];
+// The order a start walks when it is asked for a chain — the engines that work first, and last the
+// one that cannot read or write docs at all (kept because it is cheap to offer and the verdict may
+// change with a platform update; see SKILL.md for the measured capability matrix).
+//   firefox     the only engine that can ALSO use Perchance's server-side generation plugins
+//               (ai-text replies / uploads) — those embeds are CF-flagged on chromium
+//   chrome      plain chromium: clears CF headed, drives the editor + preview (no ai-text calls)
+//   chromium    the same with the legacy stealth args
+//   patchright  clears CF headed, but the platform's editor globals never publish -> cannot read
+//               or write docs, so it is only reached once everything else has failed
+const ENGINE_CHAIN = ['firefox', 'chrome', 'chromium', 'patchright'];
 
 const _engineCache = {};
 function loadChromium() {
@@ -123,10 +121,6 @@ function loadPatchright() {
   _engineCache.patchright = { chromium: mod.chromium };
   return _engineCache.patchright;
 }
-async function loadCamoufox() {
-  if (!_engineCache.camoufox) _engineCache.camoufox = await import('camoufox-js');
-  return _engineCache.camoufox;
-}
 
 // Launch one engine. `effective` is what the caller reports back; it differs from the engine key
 // only for the missing-firefox fallback (see _launch).
@@ -134,24 +128,6 @@ async function launchEngine(name, headed, width, height) {
   const spec = ENGINES[name];
   if (!spec) throw new Error('unknown engine "' + name + '" (have: ' + Object.keys(ENGINES).join(', ') + ')');
   const headless = !headed;
-  if (name === 'camoufox') {
-    // Camoufox generates a fingerprint for the requested OS and applies it at the C++ level, so
-    // nothing else may add a UA, a locale override or an init script of its own (see _newContext).
-    // `window` pins the window instead of a playwright viewport — camoufox-js cannot satisfy a
-    // viewport request while the window is pinned to a spoofed size.
-    // Do NOT pass `locale`: camoufox-js 0.13.0 crashes on it ("Cannot read properties of undefined
-    // (reading 'territoryInfo')") because its StatisticalLocaleSelector kicks off an async
-    // territoryInfo.xml load in the constructor and handleLocales() reads it synchronously. The
-    // generated fingerprint carries its own language/region, which is what we want anyway.
-    const mod = await loadCamoufox();
-    const browser = await mod.Camoufox({
-      headless,
-      os: 'windows',
-      humanize: false,
-      ...(width && height ? { window: [width, height] } : {}),
-    });
-    return { browser, engine: name, effective: 'camoufox' };
-  }
   if (name === 'patchright') {
     const pr = loadPatchright();
     return { browser: await pr.chromium.launch({ headless }), engine: name, effective: 'patchright' };
@@ -357,11 +333,6 @@ class PerchSession {
 
   async _newContext(width, height) {
     const running = ENGINES[this._runningEngine] || ENGINES.firefox;
-    if (running.family === 'camoufox') {
-      // Camoufox pins the window and spoofs everything below JS: a viewport request fights the
-      // pinned size, and a UA/locale/init-script of ours would contradict its fingerprint.
-      return this.browser.newContext({});
-    }
     const opts = { viewport: { width, height } };
     if (running.family === 'firefox' || !running.stealth) {
       // Bare context. Firefox carries no "Headless" UA marker and the native fingerprint cleared
@@ -451,7 +422,7 @@ class PerchSession {
     await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 60000 });
     let cfWaitedMs = 0;
     if (await isCfBlocked(page)) {
-      // Camoufox + Turnstile can take 60-90s of "Waiting for token..." loops
+      // Turnstile can take 60-90s of "Waiting for token..." loops
       // before the challenge clears — 25s aborted a solve that was about to
       // succeed and sent the ladder into an endless relaunch cycle.
       const cfStart = Date.now();
@@ -583,6 +554,15 @@ class PerchSession {
       const i = ENGINE_CHAIN.indexOf(this.engine);
       chain = i === -1 ? [this.engine] : ENGINE_CHAIN.slice(i);
     }
+    // A typo'd or removed engine name must fail loudly. The ladder treats a launch failure as one
+    // dead attempt and walks on, so without this an engine this build no longer ships (or a typo)
+    // would silently start a different browser.
+    const knownEngines = Object.keys(ENGINES);
+    for (const e of chain) {
+      if (!knownEngines.includes(e)) {
+        throw new Error('unknown engine "' + e + '" (have: ' + knownEngines.join(', ') + ')');
+      }
+    }
     const r = await this._openWithLadder(url, { width, height, engines: chain });
     this.generator = name;
     this.collabKey = collabKey;
@@ -593,7 +573,7 @@ class PerchSession {
         effectiveEngine: this.effectiveEngine || this.engine,
         ms: Date.now() - t0, cfBlocked: true, attempts: r.attempts,
         error: 'Cloudflare challenge not cleared after ' + r.attempts.length + ' attempt(s).',
-        hint: 'CF flagging is intermittent — retry, or headed:true. The default camoufox engine clears challenges chromium cannot.',
+        hint: 'CF flagging is intermittent — retry, or headed:true. The default firefox engine clears the subdomain challenges chromium cannot.',
       };
     }
     const st = await this.status();
@@ -1162,7 +1142,7 @@ class PerchSession {
   //
   // Names may carry virtual folders ('emoji/icon.svg'): the src store is a flat
   // string-keyed manifest, the tree groups '/' keys into folders, and the
-  // editor's upload handler keeps the full path (probed live 2026-10-19).
+  // editor's upload handler keeps the full path.
   // Re-uploading an existing path never overwrites: the editor RENAMES the
   // incoming file (name-2.ext) behind a modal notice. overwrite:true runs the
   // delete flow first — a staged delete clears the collision check, so the
@@ -1217,8 +1197,8 @@ class PerchSession {
     // Mirrors the editor's own looksLikeText() (srcFiles.js): a NUL byte in the
     // first 4KiB means binary; plus a strict UTF-8 decode of the WHOLE buffer —
     // any invalid sequence means binary. Text that survives both round-trips
-    // losslessly either way, so a false 'textual' is harmless; a false 'binary'
-    // (extension list, pre-2026-10-21) was not.
+    // losslessly either way, so a false 'textual' is harmless, while a false
+    // 'binary' is not — which is why an extension list is not used here.
     if (buf.subarray(0, 4096).includes(0)) return false;
     try { new TextDecoder('utf-8', { fatal: true }).decode(buf); return true; }
     catch (e) { return false; }

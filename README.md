@@ -60,11 +60,11 @@ silently).
 with, and the engines to try in order when one cannot load the editor or its
 preview (the generator frame failing with *"its file loader did not become
 available"*). Firefox stays the default; `chrome`/`chromium` can drive the editor
-**headed only**, and `camoufox`/`patchright` are offered but measured not to
-publish the editor's globals at all. `camoufox-js` and `patchright` are
-`optionalDependencies`, so the base install stays light and an engine that is not
-installed simply fails over to the next one. The measured capability matrix and
-the recovery steps are in `SKILL.md`.
+**headed only**, and `patchright` is offered as a last resort — it clears Cloudflare
+but the platform's editor globals never publish, so it cannot read or write docs.
+`patchright` is an `optionalDependency`, so the base install stays light and an
+engine that is not installed simply fails over to the next one. The capability
+matrix and the recovery steps are in `SKILL.md`.
 
 Updating to a newer release: `git pull && npm install`.
 
