@@ -393,23 +393,49 @@ class PerchSession {
   // loader" (root.loadDependencies, a script block of the page itself) sometimes never arrives
   // and the app never boots — the frame then shows "This generator could not start because its
   // file loader did not become available." Nothing used to look at the preview at all, so a
-  // start could report ok:true while every perch_eval against it pended forever. These three
-  // signals are read straight out of the frame.
+  // start could report ok:true while every perch_eval against it pended forever.
+  //
+  // Live/dead split (2026-11 revision): the platform renamed its app globals —
+  // window.getAiProvider no longer exists, so the old `booted: typeof getAiProvider ===
+  // 'function'` probe flagged EVERY healthy preview as dead, sent the ladder into relaunches
+  // that ended on Cloudflare walls, and left sessions worse than it found them. The reliable
+  // signals are the platform's OWN failure marker (the loader-error element, or its message
+  // text) versus actual rendered generator content; the app global is kept only as a bonus
+  // positive signal, never as the gate.
   async previewHealth() {
     if (!this.page) return { ok: true, running: false, hint: 'not started' };
     let frame;
     try { frame = await this._frame('preview'); }
     catch (e) { return { ok: true, found: false, note: 'no preview frame yet' }; }
+    const read = () => evalMain(frame, () => {
+      const errEl = document.querySelector('#perchance-src-loader-error');
+      const bodyText = String((document.body && document.body.innerText) || '');
+      const trimmed = bodyText.trim();
+      const failedByText = /could not start because its file loader/i.test(bodyText);
+      const appGlobal = typeof window.getAiProvider === 'function';
+      const rendered = trimmed.length > 0 && !failedByText;
+      return {
+        loaderError: !!errEl || failedByText,
+        loaderErrorText: errEl ? String(errEl.textContent || '').slice(0, 220) : null,
+        appGlobal,
+        rendered,
+        booted: appGlobal || rendered,
+        bootSignal: appGlobal ? 'getAiProvider' : (rendered ? 'rendered-content' : 'none'),
+        text: bodyText.slice(0, 160),
+      };
+    });
     try {
-      const r = await evalMain(frame, () => {
-        const errEl = document.querySelector('#perchance-src-loader-error');
-        return {
-          loaderError: !!errEl,
-          loaderErrorText: errEl ? String(errEl.textContent || '').slice(0, 220) : null,
-          booted: typeof window.getAiProvider === 'function',
-          text: String((document.body && document.body.innerText) || '').slice(0, 160),
-        };
-      });
+      let r = await read();
+      /* A frame caught mid-boot shows neither the failure marker nor content yet — grant a
+         few increasing grace passes before calling it dead; the ladder treats "dead" as a
+         reason to relaunch (which can end on a CF wall), so a premature verdict is the most
+         expensive mistake this probe can make. Observed 2026-11-08: a cold-start preview
+         stayed blank past a single 2s grace pass and triggered a needless 90s relaunch. */
+      for (const wait of [1500, 3000, 5000]) {
+        if (r.loaderError || r.rendered) break;
+        await new Promise((res) => setTimeout(res, wait));
+        r = await read();
+      }
       return { ok: true, found: true, ...r, healthy: !!r.booted && !r.loaderError };
     } catch (e) {
       return { ok: true, found: true, error: String((e && e.message) || e).slice(0, 200) };
@@ -872,30 +898,52 @@ class PerchSession {
     if (!this.page) throw new Error('call perch_start first');
     this._touch();
     const before = this.diag.console.length;
-    {
-      const fr = await this._frame('preview').catch(() => null);
-      if (fr) await evalMain(fr, () => { window.__perchReloadFlag = true; }).catch(() => {});
+    // Reload strategy (2026-11 revision): the navigational reloads (hardReloadOutputIframe,
+    // editor.handleReloadButtonClick) send the preview iframe on a FRESH cross-subdomain
+    // navigation, which Cloudflare punishes with an endless loader — and one hung preview
+    // eval can wedge this single-threaded server for good (observed 2026-11-08). The
+    // platform's own hot-update, editor.updateOutput(), pushes the room's current HTML into
+    // the live preview IN PLACE (the same path typing uses): no navigation, no CF. It is
+    // tier 1 now; the hard reload is only a fallback. Every preview eval is raced with a
+    // short cap so nothing here can wedge the server again.
+    const race = (p, ms) => Promise.race([Promise.resolve(p), new Promise((res) => setTimeout(() => res(undefined), ms))]);
+    let via = 'update-output';
+    const updated = await race(evalMain(this.page, () => {
+      try {
+        if (window.editor && typeof window.editor.updateOutput === 'function') {
+          window.editor.updateOutput();
+          return true;
+        }
+        return false;
+      } catch (e) { return false; }
+    }), 10000);
+    if (updated !== true) {
+      via = 'hard-reload';
+      {
+        const fr = await this._frame('preview').catch(() => null);
+        if (fr) await race(evalMain(fr, () => { window.__perchReloadFlag = true; }), 3000).catch(() => {});
+      }
+      await race(evalMain(this.page, () => {
+        try { if (window.hardReloadOutputIframe) window.hardReloadOutputIframe(); } catch (e) {}
+      }), 5000);
     }
-    await evalMain(this.page, () => {
-      try { if (window.hardReloadOutputIframe) window.hardReloadOutputIframe(); } catch (e) {}
-    });
     const t0 = Date.now();
     let loaded = false;
     while (Date.now() - t0 < 25000) {
       const fr = await this._frame('preview').catch(() => null);
       if (fr) {
-        const st = await evalMain(fr, () => ({ flag: !!window.__perchReloadFlag, rs: document.readyState }))
+        const st = await race(evalMain(fr, () => ({ flag: !!window.__perchReloadFlag, rs: document.readyState })), 3000)
           .catch(() => null);
         if (st && !st.flag && st.rs === 'complete') { loaded = true; break; }
       }
       await this.page.waitForTimeout(400);
     }
     await this.page.waitForTimeout(700);
-    const syntaxErrors = await evalMain(this.page, () => {
+    const syntaxErrors = await race(evalMain(this.page, () => {
       try { return window.getEditorSyntaxErrors ? window.getEditorSyntaxErrors() : null; } catch (e) { return null; }
-    }).catch(() => null);
+    }), 5000).catch(() => null);
     return {
-      ok: true, previewLoaded: loaded, syntaxErrors,
+      ok: true, via, previewLoaded: loaded, syntaxErrors,
       runtimeErrors: this.diag.errors.slice(-30),
       newConsoleLines: this.diag.console.slice(before).slice(-40),
       panel: await this._readConsole(),
