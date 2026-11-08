@@ -715,8 +715,24 @@ class PerchSession {
       const v = pane === 'model' ? window.modelTextEditor : window.outputTemplateEditor;
       if (!v) return { ok: false, error: 'editor view not ready' };
       const all = v.state.doc.toString().split('\n');
-      const slice = all.slice(offset - 1, offset - 1 + limit);
-      return { ok: true, pane, totalLines: all.length, lines: slice.map((l, i) => `${offset + i}|${l}`) };
+      // Clamp the window and cap per-line length: a default 2000-line read of a
+      // minified-ish pane once spilled ~120KB into the caller's context. Truncated
+      // lines are marked so exact-text edit anchoring never silently lies.
+      const start = Math.max(1, Math.min(Math.trunc(offset) || 1, all.length));
+      const count = Math.max(1, Math.min(Math.trunc(limit) || 2000, all.length - start + 1, 5000));
+      const MAX = 800;
+      let linesTruncated = 0;
+      const slice = [];
+      for (let i = start - 1; i < start - 1 + count; i++) {
+        const l = all[i];
+        if (l.length > MAX) {
+          linesTruncated++;
+          slice.push(`${i + 1}|${l.slice(0, MAX)}…(+${l.length - MAX} chars)`);
+        } else {
+          slice.push(`${i + 1}|${l}`);
+        }
+      }
+      return { ok: true, pane, totalLines: all.length, linesTruncated, lines: slice };
     }, { pane, offset, limit });
   }
 
@@ -1065,6 +1081,26 @@ class PerchSession {
     try {
       await target.click({ timeout });
       return { ok: true, clicked: selector, frame, matches: await loc.count().catch(() => null) };
+    } catch (e) {
+      return { ok: false, error: String((e && e.message) || e).slice(0, 200), matches: await loc.count().catch(() => 0) };
+    }
+  }
+
+  // Real mouse hover (locator.hover): the only way CSS :hover engages — a JS .click()
+  // dispatch or an eval cannot move the pointer, so hover-revealed controls (opacity
+  // keyed to :hover, tooltips, menu bars) stay hidden no matter how they are "clicked".
+  async hover({ selector, frame = 'preview', timeout = 10000, nth = null } = {}) {
+    if (!this.page) throw new Error('call perch_start first');
+    this._touch();
+    if (!selector) throw new Error('missing selector');
+    const fr = await this._frame(frame);
+    const loc = selector.startsWith('text=')
+      ? fr.getByText(selector.slice(5), { exact: false })
+      : fr.locator(selector);
+    const target = nth != null ? loc.nth(nth) : loc.first();
+    try {
+      await target.hover({ timeout });
+      return { ok: true, hovered: selector, frame, matches: await loc.count().catch(() => null) };
     } catch (e) {
       return { ok: false, error: String((e && e.message) || e).slice(0, 200), matches: await loc.count().catch(() => 0) };
     }

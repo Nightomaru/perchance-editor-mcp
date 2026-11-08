@@ -252,6 +252,20 @@ export const TOOLS = [
     },
   },
   {
+    name: "perch_hover",
+    description: "Move the real mouse over an element so CSS :hover applies (hover-revealed controls, tooltips). JS clicks and evals cannot do this. Pair with perch_eval + getComputedStyle to assert hover styles.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        selector: { type: "string", description: "CSS selector or 'text=...'" },
+        frame: { ...FRAME, description: "Default preview" },
+        nth: { type: "integer", description: "Hover the Nth match instead of the first" },
+        timeout: { type: "integer", description: "ms. Default 10000" },
+      },
+      required: ["selector"],
+    },
+  },
+  {
     name: "perch_type",
     description: "Type text into an element in the live preview (or editor chrome).",
     inputSchema: {
@@ -396,6 +410,7 @@ export const DISPATCH = {
   perch_snapshot: (a) => session.snapshot(a),
   perch_wait: (a) => session.wait(a),
   perch_click: (a) => session.click(a),
+  perch_hover: (a) => session.hover(a),
   perch_type: (a) => session.type(a),
   perch_press: (a) => session.press(a),
   perch_shot: (a) => session.shot(a),
