@@ -55,7 +55,7 @@ perch_stop
 | Recovery / src | `perch_navigate`, `perch_upload_src`, `perch_delete_src` | prefer `filePath`/`url` over inline `content`; binary-vs-text is content-sniffed; results carry `landed`/`integrity`/`sha256` |
 | Reading | `perch_read`, `perch_grep`, `perch_outline`, `perch_console`, `perch_errors`, `perch_snapshot` | |
 | Writing | `perch_patch` (preferred, batch), `perch_edit`, `perch_write`, `perch_write_file`, `perch_copy_lines` | `perch_write_file` is the only path that carries a multi-MB outputTemplate; `oldString not found` → grep the real text first |
-| Preview / UI | `perch_refresh`, `perch_eval`, `perch_wait`, `perch_click`, `perch_type`, `perch_press`, `perch_set_viewport`, `perch_shot` | `perch_click`/`perch_wait` take CSS or `text=…`; `nth` picks a later match |
+| Preview / UI | `perch_refresh`, `perch_eval`, `perch_wait`, `perch_click`, `perch_type`, `perch_press`, `perch_set_viewport`, `perch_shot` | `perch_click`/`perch_wait` take CSS or `text=…`; `nth` picks a later match; `perch_shot` is clip-based (safe on apps with infinite animations, 15s timeout): `what:'preview'` = the app iframe only, `selector` captures one element (`frame` picks where it lives, default preview) |
 
 ## Procedure
 

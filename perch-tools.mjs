@@ -294,11 +294,13 @@ export const TOOLS = [
   },
   {
     name: "perch_shot",
-    description: "Screenshot. what: 'editor' (default) = whole editor page; 'preview' = the running generator iframe.",
+    description: "Screenshot. what: 'editor' (default) = whole editor page; 'preview' = the running generator iframe (clip-based — safe on apps with infinite animations, 15s hard timeout). selector: capture a single element instead (must be visible; frame picks where it lives, default preview). Finite animations are fast-forwarded and infinite ones frozen for a deterministic frame.",
     inputSchema: {
       type: "object",
       properties: {
-        what: { type: "string", enum: ["editor", "preview"], description: "Default editor" },
+        what: { type: "string", enum: ["editor", "preview"], description: "Default editor. Ignored when selector is set." },
+        selector: { type: "string", description: "CSS selector of one element to capture, e.g. '#csNav' or '.character'" },
+        frame: { ...FRAME, description: "Where selector lives: 'preview' (default) or 'editor'" },
         path: { type: "string", description: "Output file path" },
       },
       required: [],

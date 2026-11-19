@@ -1146,22 +1146,47 @@ class PerchSession {
     return { ok: true, viewport: { width, height }, iframe: rect };
   }
 
-  async shot({ what = 'editor', path: p } = {}) {
+  async shot({ what = 'editor', path: p, selector, frame = 'preview' } = {}) {
     if (!this.page) throw new Error('call perch_start first');
     this._touch();
     const out = p || path.join(__dirname, 'perch_shot.png');
-    if (what === 'preview') {
-      const el = await this.page.$('#outputIframeEl');
-      if (el) await el.screenshot({ path: out });
-      else {
-        const frame = await this._frame('preview');
-        if (typeof frame.screenshot === 'function') await frame.screenshot({ path: out });
-        else throw new Error('cannot screenshot preview');
+    // Clip-based capture throughout. element.screenshot() waits on element stability,
+    // which an app with infinite CSS animations never satisfies (it hung the whole
+    // single-threaded server on the Aurora deck). boundingBox + page.screenshot({clip})
+    // is pure geometry — no stability wait — and animations:'disabled' fast-forwards
+    // finite animations / cancels infinite ones so the capture is immediate and
+    // deterministic. The hard timeout means a shot can never wedge the server again.
+    const opts = { path: out, animations: 'disabled', caret: 'hide', timeout: 15000 };
+    let clip = null;
+    let target = what;
+    if (selector) {
+      const fr = await this._frame(frame);
+      const el = await fr.$(selector);
+      if (!el) throw new Error(`selector not found in ${frame}: ${selector}`);
+      clip = await el.boundingBox();
+      if (!clip) throw new Error(`selector has no visible box in ${frame}: ${selector}`);
+      target = `selector(${frame}: ${selector})`;
+    } else if (what === 'preview') {
+      let el = await this.page.$('#outputIframeEl');
+      if (!el) {
+        const fr = await this._frame('preview');
+        el = await fr.frameElement();
       }
-    } else {
-      await this.page.screenshot({ path: out, fullPage: false });
+      if (!el) throw new Error('preview iframe not found');
+      clip = await el.boundingBox();
+      if (!clip) throw new Error('preview iframe has no visible box');
     }
-    return { ok: true, what, path: out };
+    if (clip) {
+      if (clip.width <= 0 || clip.height <= 0) throw new Error('capture target has zero size');
+      clip = { x: Math.max(0, clip.x), y: Math.max(0, clip.y), width: clip.width, height: clip.height };
+      await this.page.screenshot({ ...opts, clip });
+    } else {
+      await this.page.screenshot({ ...opts, fullPage: false });
+    }
+    return {
+      ok: true, what: target, path: out,
+      clip: clip ? { x: Math.round(clip.x), y: Math.round(clip.y), width: Math.round(clip.width), height: Math.round(clip.height) } : null,
+    };
   }
 
   // ---------------- src/ access (via curl, passes CF) ----------------
