@@ -1,7 +1,7 @@
 ---
 name: perchance-editor
 description: Read, patch, and live-test Perchance generators over MCP.
-version: 2.5.0
+version: 2.6.0
 author: Nightomaru, Hermes Agent
 license: MIT
 platforms: [linux, macos, windows]
@@ -26,6 +26,9 @@ are client-namespaced — `mcp__perch__*` in Hermes.
   without one.
 - Live-testing generator UI: eval, click, type, screenshot inside the preview frame.
 - Uploading or deleting generator `src/` assets.
+- Uploading files to the PUBLIC perchance.org/upload host (anonymous public
+  URLs, optional expiry): `perch_upload_file` / `perch_delete_file` —
+  independent of any editor session.
 
 Don't use for: authoring Perchance DSL from scratch. Read the file you are about
 to edit first.
@@ -61,10 +64,37 @@ perch_stop
 | Browser-free | `perch_pull`, `perch_fetch_generator`, `perch_src`, `perch_list_src` | `perch_list_src` shows the last OWNER save only — blind to the collab room |
 | Session | `perch_start`, `perch_status`, `perch_stop` | `perch_status` is cheap (~2ms) and carries the preview health — call it liberally |
 | Recovery / src | `perch_navigate`, `perch_upload_src`, `perch_delete_src` | prefer `filePath`/`url` over inline `content`; binary-vs-text is content-sniffed; results carry `landed`/`integrity`/`sha256`; deletes need a REAL firefox click (trusted gesture), so run headed |
+| Public upload | `perch_upload_file`, `perch_delete_file` | own HEADED patchright window (only engine that passes CF+Turnstile on the upload embed); anonymous link-public files; source precedence `filePath` > `url` > `content`; `expires` enum; integrity readback hash-compared; 3-day delete window; see the "Public file upload" section |
 | Reading | `perch_read`, `perch_grep`, `perch_outline`, `perch_console`, `perch_errors`, `perch_snapshot` | `perch_read` takes offset/limit (1-indexed); lines >800 chars are cut and counted in `linesTruncated` — anchor exact-text edits from grep or the mirror, not a truncated read |
 | Writing | `perch_patch` (preferred, batch), `perch_edit`, `perch_write`, `perch_write_file`, `perch_copy_lines` | `perch_write_file` is the only path that carries a multi-MB outputTemplate; `oldString not found` → grep the real text first |
 | Preview / UI | `perch_refresh`, `perch_eval`, `perch_wait`, `perch_click`, `perch_hover`, `perch_type`, `perch_press`, `perch_set_viewport`, `perch_shot` | `perch_click`/`perch_wait` take CSS or `text=…`; `nth` picks a later match; `perch_hover` moves the real mouse so `:hover` engages — the only way to test hover-revealed controls (JS clicks/evals never move the pointer); `perch_shot` is clip-based — `what:'preview'` captures ONLY the app iframe (safe on infinite animations, ~50ms, 15s hard timeout), `selector` captures one element with `frame` picking preview (default) / editor; the response reports the clip rect |
 | Batch | `perch_batch` | Chain UI actions in ONE call — the per-step agent round-trip, not the click, is the latency. `steps:[{action:'click', selector, nth}, {action:'eval', js}, {action:'wait', selector}, …]`: args FLAT, action without the `perch_` prefix. Chainable: click/hover/type/press/eval/wait/shot/snapshot/errors/console/status/grep/read/refresh; lifecycle + pane-write/asset tools stay solo. Validates the whole chain before executing; stops at first failure unless `continueOnError:true`; `stepDelayMs` pauses between steps (`perch_wait` has no plain ms sleep); results truncated to `maxResultChars` (default 4000); whole-chain `timeoutMs` (default 120000) — a timed-out step's browser action may still complete, probe before retrying. Measured: a 6-step UI chain ran ~2.7s server-side in one call |
+
+## Public file upload (perchance.org/upload)
+
+`perch_upload_file` / `perch_delete_file` use Perchance's PUBLIC uploader — NOT
+the editor `src/` store: no generator, no collab key, no owner save. Files are
+anonymous and accessible to ANYONE with the link; never upload secrets or
+personal data.
+
+- Source precedence `filePath` > `url` > `content`; `expires` enum
+  `never/1h/1d/1w/1mo/3mo/1y` (setting an expiry raises max size / daily quota:
+  1d ~400x, 1y ~20x).
+- Returns `{url, fileId, deletionKey, size, fileAlreadyExisted, expiresAt,
+  deleteExpiresAt, integrity}` — `integrity.match` is a real readback of the
+  public URL, hash-compared against the local bytes.
+- Implementation: a dedicated HEADED patchright-chromium window with a
+  persistent profile (`.perch-upload-profile/`, git-ignored — holds the
+  anonymous antiBotKey) parked on `upload.perchance.org/embed#{}`. Only that
+  engine combination passes CF + Turnstile on the embed (firefox and playwright
+  chromium clear CF but fail Turnstile with 600010; headless patchright fails
+  the CF edge). Keep the window visible while uploading; it tears down after
+  ~20 min idle. Page interaction goes through raw CDP `Runtime.evaluate` —
+  patchright's `page.evaluate` runs in an ISOLATED world where page globals are
+  invisible.
+- Delete rights expire 3 days after upload; identical bytes dedup to the same
+  URL. Failures return `{ok:false, error, hint, log}` — `file_too_big` suggests
+  WebP conversion, `over_daily_allowance` means try tomorrow (or drop the VPN).
 
 ## Procedure
 

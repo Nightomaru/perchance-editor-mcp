@@ -177,13 +177,14 @@ Full recipe, collab/publish semantics, and the Cloudflare ladder:
 
 ## The tool set
 
-31 tools. All return JSON with an `ok` boolean and an `ms` timing field.
+33 tools. All return JSON with an `ok` boolean and an `ms` timing field.
 
 | Group | Tools |
 | --- | --- |
 | **Browser-free** (no session) | `perch_pull`, `perch_fetch_generator`, `perch_src`, `perch_list_src` |
 | **Session** | `perch_start`, `perch_status`, `perch_stop` |
 | **Recovery / src files** | `perch_navigate`, `perch_upload_src`, `perch_delete_src` |
+| **Public upload** | `perch_upload_file`, `perch_delete_file` — anonymous public URLs via perchance.org/upload (NOT editor src/): source `filePath` > `url` > `content`, `expires` enum (never/1h/1d/1w/1mo/3mo/1y), integrity readback hash-compared to local bytes, 3-day delete window. Runs its own HEADED patchright window — the only engine that passes Cloudflare + Turnstile on the upload embed — and tears it down after ~20 min idle. |
 | **Reading** (live) | `perch_read`, `perch_grep`, `perch_outline`, `perch_console`, `perch_errors`, `perch_snapshot` |
 | **Writing** (live) | `perch_patch`, `perch_edit`, `perch_write`, `perch_write_file`, `perch_copy_lines` |
 | **Preview / UI** | `perch_refresh`, `perch_eval`, `perch_wait`, `perch_click`, `perch_type`, `perch_press`, `perch_set_viewport`, `perch_shot` |
