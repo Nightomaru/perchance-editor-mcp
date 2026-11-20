@@ -390,6 +390,37 @@ export const TOOLS = [
       required: ["path"],
     },
   },
+  {
+    name: "perch_batch",
+    description:
+      "Chain multiple UI actions in ONE call. Each step runs in-process (no per-step agent round-trip - that round-trip, not the click itself, is where the latency lives). steps: [{action, ...that tool's args FLAT}], e.g. [{action:'eval', js:'window.csPagerGoTo(2)'},{action:'wait', selector:'#starterCharacterList .character'},{action:'click', selector:'#starterCharacterList .character', nth:0},{action:'wait', selector:'#messageInput'},{action:'eval', js:'(async()=>{const c=await window.db.characters.toArray();return c.map(x=>x.name)})()'}]. Chainable actions: click, hover, type, press, eval, wait, shot, snapshot, errors, console, status, grep, read, refresh. Lifecycle (start/stop/navigate) and pane-write/asset tools stay solo. The whole chain is validated BEFORE anything executes. Stops at the first failed step unless continueOnError:true. stepDelayMs pauses between steps (default 0; use it or wait steps for UI transitions - perch_wait has no plain ms sleep). Each step result is truncated to maxResultChars (default 4000). timeoutMs is the whole-chain budget (default 120000); a timed-out step's underlying browser action may still complete, so probe state before retrying. Returns {ok, completed, total, steps:[{i, action, ok, ms, result|error}], ms}.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        steps: {
+          type: "array",
+          description:
+            "Ordered steps, max 50. Each: {action: <name without perch_ prefix>, ...args of that tool flat (selector/js/text/key/frame/nth/timeout/...)}",
+          items: {
+            type: "object",
+            properties: {
+              action: {
+                type: "string",
+                enum: ["click", "hover", "type", "press", "eval", "wait", "shot", "snapshot", "errors", "console", "status", "grep", "read", "refresh"],
+              },
+            },
+            required: ["action"],
+            additionalProperties: true,
+          },
+        },
+        continueOnError: { type: "boolean", description: "Keep going after a failed step. Default false (stop at first failure)" },
+        stepDelayMs: { type: "integer", description: "Pause between steps. Default 0" },
+        maxResultChars: { type: "integer", description: "Truncate each step's result JSON to this many chars. Default 4000" },
+        timeoutMs: { type: "integer", description: "Whole-chain budget in ms. Default 120000" },
+      },
+      required: ["steps"],
+    },
+  },
 ];
 
 // ----------------------------- dispatch -----------------------------
@@ -424,4 +455,77 @@ export const DISPATCH = {
   perch_navigate: (a) => session.navigate(a),
   perch_upload_src: (a) => session.uploadSrc(a),
   perch_delete_src: (a) => session.deleteSrc(a),
+};
+
+// ----------------------------- batch chaining -----------------------------
+// One MCP call, many UI actions: steps dispatch in-process, so the per-step cost
+// is milliseconds of Playwright work instead of a full agent round-trip. Only
+// UI-driving + observation tools are chainable; lifecycle and pane-write/asset
+// tools stay solo (a half-applied write chain is not a thing we want).
+const BATCH_ACTIONS = new Set([
+  "click", "hover", "type", "press", "eval", "wait", "shot", "snapshot",
+  "errors", "console", "status", "grep", "read", "refresh",
+]);
+
+DISPATCH.perch_batch = async (a) => {
+  const t0 = Date.now();
+  const fail = (error) => ({ ok: false, error, ms: Date.now() - t0 });
+  const stepsIn = a && a.steps;
+  if (!Array.isArray(stepsIn) || stepsIn.length === 0) return fail("steps must be a non-empty array");
+  if (stepsIn.length > 50) return fail("too many steps (max 50)");
+  const continueOnError = a.continueOnError === true;
+  const stepDelayMs = Number.isFinite(a.stepDelayMs) ? Math.max(0, a.stepDelayMs) : 0;
+  const maxResultChars = Number.isFinite(a.maxResultChars) ? Math.max(200, a.maxResultChars) : 4000;
+  const budgetMs = Number.isFinite(a.timeoutMs) ? Math.max(1000, a.timeoutMs) : 120000;
+
+  // Validate the WHOLE chain before touching the browser: a malformed step 7
+  // must not leave steps 1-6 half-applied.
+  for (let i = 0; i < stepsIn.length; i++) {
+    const s = stepsIn[i];
+    if (!s || typeof s !== "object" || typeof s.action !== "string") return fail(`step ${i}: missing action`);
+    if (!BATCH_ACTIONS.has(s.action)) {
+      return fail(`step ${i}: action '${s.action}' is not chainable (allowed: ${[...BATCH_ACTIONS].join(", ")})`);
+    }
+  }
+
+  const steps = [];
+  let allOk = true;
+  for (let i = 0; i < stepsIn.length; i++) {
+    const { action, ...args } = stepsIn[i];
+    const remaining = budgetMs - (Date.now() - t0);
+    if (remaining <= 0) {
+      steps.push({ i, action, ok: false, error: "batch timeout before step", ms: 0 });
+      allOk = false;
+      break;
+    }
+    const st0 = Date.now();
+    let timer = null;
+    let rec;
+    try {
+      const fn = DISPATCH["perch_" + action];
+      const result = await Promise.race([
+        fn(args),
+        new Promise((_, rej) => {
+          timer = setTimeout(() => rej(new Error(`step timeout after ${remaining}ms (underlying browser action may still complete)`)), remaining);
+        }),
+      ]);
+      const okStep = !(result && result.ok === false);
+      let payload = result;
+      const serialized = JSON.stringify(result);
+      if (serialized && serialized.length > maxResultChars) {
+        payload = serialized.slice(0, maxResultChars) + `...(truncated, ${serialized.length} chars total)`;
+      }
+      rec = { i, action, ok: okStep, ms: Date.now() - st0, result: payload };
+      if (!okStep) allOk = false;
+    } catch (e) {
+      rec = { i, action, ok: false, ms: Date.now() - st0, error: String((e && e.message) || e) };
+      allOk = false;
+    } finally {
+      if (timer) clearTimeout(timer);
+    }
+    steps.push(rec);
+    if (!rec.ok && !continueOnError) break;
+    if (stepDelayMs > 0 && i < stepsIn.length - 1) await new Promise((r) => setTimeout(r, stepDelayMs));
+  }
+  return { ok: allOk && steps.length === stepsIn.length, completed: steps.length, total: stepsIn.length, steps, ms: Date.now() - t0 };
 };

@@ -4,45 +4,52 @@ description: Read, patch, and live-test Perchance generators over MCP.
 version: 2.4.0
 author: Nightomaru
 license: MIT
+platforms: [linux, macos, windows]
+metadata:
+  hermes:
+    tags: [perchance, mcp, generator, live-editor, playwright, collab, cloudflare]
+    category: software-development
 ---
 
 # perch-mcp — operating manual
 
 Read/write control of a Perchance.org generator's live editor: mirror the source
-without a browser, patch `main.pjs` (the Perchance DSL) and `index.html` (the
-generator's UI), and evaluate JS in the editor or in the sandboxed preview frame.
+browser-free, patch `main.pjs` (the Perchance DSL) and `index.html` (the
+generator's UI), and eval JS in the editor or the sandboxed preview frame. Tools
+are client-namespaced — `mcp__perch__*` in Hermes.
 
 ## When to Use
 
-- Reading or grepping a generator's source: mirror it first, never grep a 40k-line
-  document in the browser.
+- Reading or grepping a generator's source: mirror it, never grep a 40k-line doc
+  in the browser.
 - Editing a generator's live editor, with a collab room (`#edit:collab=KEY`) or
   without one.
-- Live-testing generator UI: eval, click, type, screenshot in the preview frame.
+- Live-testing generator UI: eval, click, type, screenshot inside the preview frame.
 - Uploading or deleting generator `src/` assets.
 
-Don't use for: authoring Perchance DSL from scratch. Read the file you are about to
-edit first.
+Don't use for: authoring Perchance DSL from scratch. Read the file you are about
+to edit first.
 
 ## Prerequisites
 
-- The `perch` MCP server (Node + playwright firefox; `patchright` optional).
+- The `perch` MCP server (`node` + playwright firefox; `patchright` optional).
 - `pane` = `model` (`main.pjs`) | `output` (`index.html`). `main.pjs` is the
   Perchance DSL, **not** JavaScript — only `index.html` is `node --check`-able.
-- A collab key is a credential: never commit it, never paste it into a file.
-- Prefer `headed: true` for interactive work so the user can watch.
+- A collab key is a **credential**: never commit it, never paste it into a file.
+- Prefer `headed: true` for interactive work so the user can watch; don't minimize
+  the window.
 
 ## How to Run
 
 ```
 perch_pull {name}                     # mirror both panes locally, ~1s, no browser
-                                      #   then grep/read the mirror at full speed
+read_file / search_files              # work the mirror at full speed
 perch_start {name, collabKey, headed} # browser + live editor
 perch_status                          # docsReady, line counts, preview health
 perch_read / perch_grep               # confirm the live doc is what you assume
 perch_patch {changes: [...]}          # edit (batch; settle once at the end)
 perch_status → perch_errors           # saveState, syntax + runtime errors
-perch_snapshot → perch_click/perch_type
+perch_snapshot → perch_click/perch_type   # (or perch_batch: chain the whole UI flow in ONE call)
 perch_stop
 ```
 
@@ -55,7 +62,8 @@ perch_stop
 | Recovery / src | `perch_navigate`, `perch_upload_src`, `perch_delete_src` | prefer `filePath`/`url` over inline `content`; binary-vs-text is content-sniffed; results carry `landed`/`integrity`/`sha256` |
 | Reading | `perch_read`, `perch_grep`, `perch_outline`, `perch_console`, `perch_errors`, `perch_snapshot` | |
 | Writing | `perch_patch` (preferred, batch), `perch_edit`, `perch_write`, `perch_write_file`, `perch_copy_lines` | `perch_write_file` is the only path that carries a multi-MB outputTemplate; `oldString not found` → grep the real text first |
-| Preview / UI | `perch_refresh`, `perch_eval`, `perch_wait`, `perch_click`, `perch_type`, `perch_press`, `perch_set_viewport`, `perch_shot` | `perch_click`/`perch_wait` take CSS or `text=…`; `nth` picks a later match; `perch_shot` is clip-based (safe on apps with infinite animations, 15s timeout): `what:'preview'` = the app iframe only, `selector` captures one element (`frame` picks where it lives, default preview) |
+| Preview / UI | `perch_refresh`, `perch_eval`, `perch_wait`, `perch_click`, `perch_type`, `perch_press`, `perch_set_viewport`, `perch_shot` | `perch_click`/`perch_wait` take CSS or `text=…`; `nth` picks a later match; `perch_shot` is clip-based — `what:'preview'` captures ONLY the app iframe (safe on infinite animations, ~50ms, 15s hard timeout; the old element.screenshot path hung the server on stability waits), `selector` captures one element with `frame` picking preview (default) / editor; the response reports the clip rect |
+| Batch | `perch_batch` | Chain UI actions in ONE call — the per-step agent round-trip, not the click, is the latency. `steps:[{action:'click', selector, nth}, {action:'eval', js}, {action:'wait', selector}, …]`: args FLAT, action without the `perch_` prefix. Chainable: click/hover/type/press/eval/wait/shot/snapshot/errors/console/status/grep/read/refresh; lifecycle + pane-write/asset tools stay solo. Validates the whole chain before executing; stops at first failure unless `continueOnError:true`; `stepDelayMs` pauses between steps (`perch_wait` has no plain ms sleep); results truncated to `maxResultChars` (default 4000); whole-chain `timeoutMs` (default 120000) — a timed-out step's browser action may still complete, probe before retrying. Measured: a 6-step deck-navigation + quick-add chain ran 2.7s server-side in one call |
 
 ## Procedure
 
@@ -110,57 +118,59 @@ perch_eval {frame:"editor", js:"JSON.stringify(window.srcState?._internals?.work
 `deleted:true` is a staged tombstone; a folder row still renders until the owner
 saves even when everything under it is tombstoned.
 
-**Editing rules.** Grep the live doc before anchoring an edit — `oldString not
-found` means the text is not what you think it is. Settle once: chain edits with
-`settle: false` and settle at the end, because an unsettled edit drops on reload
-while a settled one survives a full page reload. Deploy accumulated rounds as
-FINAL-STATE hunks against the live doc's actual text; replaying round-by-round
-diffs double-applies or fails. After any pane write, `perch_refresh` then
-`perch_errors` — `syntaxErrors: null` never covers runtime errors, and a scripted
-replacement that drops a `var` still passes `node --check`.
-
-**`perch_eval` discipline.** Callbacks are serialized, so only `arg` is in scope.
-Keep evals synchronous or fully guarded: a throw inside `setTimeout` leaves the
-promise pending until the tool times out. `""`/`0` for something visibly present
-means the wrong frame. Editors exist before their docs populate, so `totalLines: 1`
-means "not synced yet", not "empty file".
-
-**Simulated renders.** Inject the `<style>` into `document.body` (the generator's
-own style blocks live there and win specificity ties), boot at the target width
-(the mobile/desktop mode is picked once at load), and assert with `getComputedStyle`
-/ `getBoundingClientRect`. Never report an injected render as deployed.
-
-**Chat-layout traps.** A feed inside a flex parent needs `width: 100%`, not
-`margin: 0 auto`; an absolutely positioned input wrapper needs `max-width`, never a
-fixed `width`; never add `display:none !important` to buttons the generator toggles
-itself.
-
 ## Platform behaviour you cannot fix
 
 - **Cloudflare gates the perchance subdomains** (`text-generation.`, `upload.`,
   `<32-hex>.perchance.org`) separately from the main site. Firefox clears them,
   including the ai-text plugin iframe; chromium-family engines sit on those
-  challenges. A `SyntaxError: Unexpected token '<'` after a 403 on perchance APIs is
-  CF noise, not a generator bug.
+  challenges. A `SyntaxError: Unexpected token '<'` after a 403 on perchance APIs
+  is CF noise, not a generator bug.
 - **Uploads never overwrite**: a colliding name lands as `name-2.ext`; pass
-  `overwrite: true` for intent. Upload and delete are staged like edits — visible at
-  once, public only on the owner save.
+  `overwrite: true` for intent. Upload and delete are staged like edits — visible
+  at once, public only on the owner save.
 - **The preview frame may be running the last SAVED generator**, not the room's
   current bytes. After a write, probe a global from your own change before trusting
   any preview observation; absent means you are looking at the saved generator.
-- **`collabSynced` is always false** — it reads a global the current editor build no
-  longer exposes. Use the reload test in Verification instead.
+- **`collabSynced` is always false** — it reads a global the current editor build
+  no longer exposes. Use the reload test in Verification instead.
 - **`perch_start {force:true}` may report `recoveryStep: "reuse"` and keep the old
   page**, so it is not a reload; the eval in Verification is.
 - **Never `location.reload()` the preview iframe**: a fresh cross-subdomain
   navigation gets CF-blocked permanently in that frame. Reload the editor page
   (Verification) or use `perch_start {force:true}`.
-- **Only plain firefox reaches Perchance's server-side generation plugins** (ai-text
-  replies, `perch_upload_src`). Nothing else is a working fallback for those; use
-  the other engines for editor work only.
-- **The browser closes after ~20 min idle**, so keep tool calls flowing. If the
-  collab socket dies, unsynced edits live only in the page buffer — re-apply from
-  the local working copy after a fresh `perch_start`.
+- **Only plain firefox reaches Perchance's server-side generation plugins**
+  (ai-text replies, `perch_upload_src`). Nothing else is a working fallback for
+  those; use the other engines for editor work only.
+
+## Rules that keep a session predictable
+
+- Grep the live doc before anchoring an edit; `oldString not found` means the text
+  is not what you think it is.
+- Settle once: chain edits with `settle: false`, settle at the end. An unsettled
+  edit drops on reload; a settled one survives a full page reload.
+- Deploy accumulated rounds as FINAL-STATE hunks against the live doc's actual
+  text — replaying round-by-round diffs double-applies or fails.
+- After any pane write: `perch_refresh`, then `perch_errors`. `syntaxErrors: null`
+  never covers runtime errors, and a scripted replacement that drops a `var` still
+  passes `node --check`.
+- `perch_eval` callbacks are serialized — only `arg` is in scope. Keep evals
+  synchronous or fully guarded: a throw inside `setTimeout` leaves the promise
+  pending until the tool times out.
+- Editors exist before their docs populate; `totalLines: 1` means "not synced yet",
+  not "empty file". `perch_eval` returning `""`/`0` for something visibly present
+  means the wrong frame.
+- Clear the console buffer (`perch_errors {clear: true}`) after fixing something.
+- Simulated renders: inject the `<style>` into `document.body` (the generator's own
+  style blocks live there and win specificity ties), boot at the target width (the
+  mobile/desktop mode is picked once at load), and assert with `getComputedStyle` /
+  `getBoundingClientRect`. Never report an injected render as deployed.
+- Chat-layout traps: a feed inside a flex parent needs `width: 100%` (not
+  `margin: 0 auto`); an absolutely positioned input wrapper needs `max-width`, never
+  a fixed `width`; never add `display:none !important` to buttons the generator
+  toggles itself.
+- The browser closes after ~20 min idle, so keep tool calls flowing. If the collab
+  socket dies, unsynced edits live only in the page buffer — re-apply from the local
+  working copy after a fresh `perch_start`.
 
 ## Verification
 
@@ -172,6 +182,16 @@ itself.
   shows `saveState: "unsaved"` with `syntaxErrors: null`.
 - **The preview still works**: `perch_status.preview.healthy === true`, then one
   `perch_eval` of a global from your change.
+
+## Local checks (this checkout)
+
+`test/` holds `engine-probe.cjs` (per-engine capability rows), `ladder-unit.cjs`
+(engine-ladder logic), `reply-roundtrip.cjs` (drives a real reply and reports the
+captured `aiTextPlugin` payload plus the stored reasoning) and `find-caller.cjs`
+(names the caller of an `aiTextPlugin` call via `new Error().stack`). Run them in
+the FOREGROUND — a harness that backgrounds them behind a closed stdin can kill the
+browser launch instantly (`stdin is not a tty`). `test/` is git-ignored, so none of
+it is published.
 
 ## Security
 

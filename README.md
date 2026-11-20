@@ -157,6 +157,7 @@ outlast short ceilings.
 8. perch_refresh                                       # reload preview, re-check
 9. perch_snapshot                                      # what can I click?
 10. perch_click / perch_type / perch_wait              # drive the UI
+    perch_batch {steps: [...]}                          # ...or chain the whole UI flow in ONE call
 11. perch_stop                                         # close the browser
 ```
 
@@ -176,7 +177,7 @@ Full recipe, collab/publish semantics, and the Cloudflare ladder:
 
 ## The tool set
 
-29 tools. All return JSON with an `ok` boolean and an `ms` timing field.
+30 tools. All return JSON with an `ok` boolean and an `ms` timing field.
 
 | Group | Tools |
 | --- | --- |
@@ -186,6 +187,7 @@ Full recipe, collab/publish semantics, and the Cloudflare ladder:
 | **Reading** (live) | `perch_read`, `perch_grep`, `perch_outline`, `perch_console`, `perch_errors`, `perch_snapshot` |
 | **Writing** (live) | `perch_patch`, `perch_edit`, `perch_write`, `perch_write_file`, `perch_copy_lines` |
 | **Preview / UI** | `perch_refresh`, `perch_eval`, `perch_wait`, `perch_click`, `perch_type`, `perch_press`, `perch_set_viewport`, `perch_shot` |
+| **Batch** | `perch_batch` — chain UI actions in one call (no per-step agent round-trip): `steps: [{action: "click", selector, nth}, {action: "eval", js}, {action: "wait", selector}, ...]`. Chainable: click/hover/type/press/eval/wait/shot/snapshot/errors/console/status/grep/read/refresh; lifecycle and pane-write tools stay solo. Whole-chain validation up front, stop-on-first-failure (or `continueOnError`), `stepDelayMs`, per-step result truncation, whole-chain `timeoutMs`. |
 
 Per-tool purpose and arguments — plus the `perch_start` argument table — are in
 [`SKILL.md`](SKILL.md).
