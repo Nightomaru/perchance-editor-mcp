@@ -1,8 +1,8 @@
 ---
 name: perchance-editor
 description: Read, patch, and live-test Perchance generators over MCP.
-version: 2.4.0
-author: Nightomaru
+version: 2.5.0
+author: Nightomaru, Hermes Agent
 license: MIT
 platforms: [linux, macos, windows]
 metadata:
@@ -32,7 +32,8 @@ to edit first.
 
 ## Prerequisites
 
-- The `perch` MCP server (`node` + playwright firefox; `patchright` optional).
+- The `perch` MCP server (`node` + playwright firefox; `patchright` optional),
+  registered over stdio — see the repo README for install and registration.
 - `pane` = `model` (`main.pjs`) | `output` (`index.html`). `main.pjs` is the
   Perchance DSL, **not** JavaScript — only `index.html` is `node --check`-able.
 - A collab key is a **credential**: never commit it, never paste it into a file.
@@ -59,11 +60,11 @@ perch_stop
 |---|---|---|
 | Browser-free | `perch_pull`, `perch_fetch_generator`, `perch_src`, `perch_list_src` | `perch_list_src` shows the last OWNER save only — blind to the collab room |
 | Session | `perch_start`, `perch_status`, `perch_stop` | `perch_status` is cheap (~2ms) and carries the preview health — call it liberally |
-| Recovery / src | `perch_navigate`, `perch_upload_src`, `perch_delete_src` | prefer `filePath`/`url` over inline `content`; binary-vs-text is content-sniffed; results carry `landed`/`integrity`/`sha256` |
-| Reading | `perch_read`, `perch_grep`, `perch_outline`, `perch_console`, `perch_errors`, `perch_snapshot` | |
+| Recovery / src | `perch_navigate`, `perch_upload_src`, `perch_delete_src` | prefer `filePath`/`url` over inline `content`; binary-vs-text is content-sniffed; results carry `landed`/`integrity`/`sha256`; deletes need a REAL firefox click (trusted gesture), so run headed |
+| Reading | `perch_read`, `perch_grep`, `perch_outline`, `perch_console`, `perch_errors`, `perch_snapshot` | `perch_read` takes offset/limit (1-indexed); lines >800 chars are cut and counted in `linesTruncated` — anchor exact-text edits from grep or the mirror, not a truncated read |
 | Writing | `perch_patch` (preferred, batch), `perch_edit`, `perch_write`, `perch_write_file`, `perch_copy_lines` | `perch_write_file` is the only path that carries a multi-MB outputTemplate; `oldString not found` → grep the real text first |
-| Preview / UI | `perch_refresh`, `perch_eval`, `perch_wait`, `perch_click`, `perch_type`, `perch_press`, `perch_set_viewport`, `perch_shot` | `perch_click`/`perch_wait` take CSS or `text=…`; `nth` picks a later match; `perch_shot` is clip-based — `what:'preview'` captures ONLY the app iframe (safe on infinite animations, ~50ms, 15s hard timeout; the old element.screenshot path hung the server on stability waits), `selector` captures one element with `frame` picking preview (default) / editor; the response reports the clip rect |
-| Batch | `perch_batch` | Chain UI actions in ONE call — the per-step agent round-trip, not the click, is the latency. `steps:[{action:'click', selector, nth}, {action:'eval', js}, {action:'wait', selector}, …]`: args FLAT, action without the `perch_` prefix. Chainable: click/hover/type/press/eval/wait/shot/snapshot/errors/console/status/grep/read/refresh; lifecycle + pane-write/asset tools stay solo. Validates the whole chain before executing; stops at first failure unless `continueOnError:true`; `stepDelayMs` pauses between steps (`perch_wait` has no plain ms sleep); results truncated to `maxResultChars` (default 4000); whole-chain `timeoutMs` (default 120000) — a timed-out step's browser action may still complete, probe before retrying. Measured: a 6-step deck-navigation + quick-add chain ran 2.7s server-side in one call |
+| Preview / UI | `perch_refresh`, `perch_eval`, `perch_wait`, `perch_click`, `perch_hover`, `perch_type`, `perch_press`, `perch_set_viewport`, `perch_shot` | `perch_click`/`perch_wait` take CSS or `text=…`; `nth` picks a later match; `perch_hover` moves the real mouse so `:hover` engages — the only way to test hover-revealed controls (JS clicks/evals never move the pointer); `perch_shot` is clip-based — `what:'preview'` captures ONLY the app iframe (safe on infinite animations, ~50ms, 15s hard timeout), `selector` captures one element with `frame` picking preview (default) / editor; the response reports the clip rect |
+| Batch | `perch_batch` | Chain UI actions in ONE call — the per-step agent round-trip, not the click, is the latency. `steps:[{action:'click', selector, nth}, {action:'eval', js}, {action:'wait', selector}, …]`: args FLAT, action without the `perch_` prefix. Chainable: click/hover/type/press/eval/wait/shot/snapshot/errors/console/status/grep/read/refresh; lifecycle + pane-write/asset tools stay solo. Validates the whole chain before executing; stops at first failure unless `continueOnError:true`; `stepDelayMs` pauses between steps (`perch_wait` has no plain ms sleep); results truncated to `maxResultChars` (default 4000); whole-chain `timeoutMs` (default 120000) — a timed-out step's browser action may still complete, probe before retrying. Measured: a 6-step UI chain ran ~2.7s server-side in one call |
 
 ## Procedure
 
@@ -118,13 +119,17 @@ perch_eval {frame:"editor", js:"JSON.stringify(window.srcState?._internals?.work
 `deleted:true` is a staged tombstone; a folder row still renders until the owner
 saves even when everything under it is tombstoned.
 
-## Platform behaviour you cannot fix
+## Pitfalls
+
+### Platform behaviour you cannot fix
 
 - **Cloudflare gates the perchance subdomains** (`text-generation.`, `upload.`,
   `<32-hex>.perchance.org`) separately from the main site. Firefox clears them,
   including the ai-text plugin iframe; chromium-family engines sit on those
   challenges. A `SyntaxError: Unexpected token '<'` after a 403 on perchance APIs
   is CF noise, not a generator bug.
+- **Direct Perchance API calls need a browser User-Agent**: plain curl/default-UA
+  requests draw 403/CF noise even when the endpoint itself is fine.
 - **Uploads never overwrite**: a colliding name lands as `name-2.ext`; pass
   `overwrite: true` for intent. Upload and delete are staged like edits — visible
   at once, public only on the owner save.
@@ -142,7 +147,7 @@ saves even when everything under it is tombstoned.
   (ai-text replies, `perch_upload_src`). Nothing else is a working fallback for
   those; use the other engines for editor work only.
 
-## Rules that keep a session predictable
+### Session rules
 
 - Grep the live doc before anchoring an edit; `oldString not found` means the text
   is not what you think it is.
@@ -152,7 +157,9 @@ saves even when everything under it is tombstoned.
   text — replaying round-by-round diffs double-applies or fails.
 - After any pane write: `perch_refresh`, then `perch_errors`. `syntaxErrors: null`
   never covers runtime errors, and a scripted replacement that drops a `var` still
-  passes `node --check`.
+  passes `node --check`. Expect `redeclaration of const ...` runtime errors after
+  a hot-update: the platform re-evals the generator script in the live frame —
+  editing-time noise, not a bytes defect.
 - `perch_eval` callbacks are serialized — only `arg` is in scope. Keep evals
   synchronous or fully guarded: a throw inside `setTimeout` leaves the promise
   pending until the tool times out.
@@ -171,6 +178,9 @@ saves even when everything under it is tombstoned.
 - The browser closes after ~20 min idle, so keep tool calls flowing. If the collab
   socket dies, unsynced edits live only in the page buffer — re-apply from the local
   working copy after a fresh `perch_start`.
+- Prefer `perch_batch` for multi-step UI flows: one round-trip instead of one per
+  click. After a server code update, a newly added tool is not callable until the
+  MCP connection re-registers (client reload or a fresh session).
 
 ## Verification
 
@@ -183,13 +193,14 @@ saves even when everything under it is tombstoned.
 - **The preview still works**: `perch_status.preview.healthy === true`, then one
   `perch_eval` of a global from your change.
 
-## Local checks (this checkout)
+### Local checks (this checkout)
 
 `test/` holds `engine-probe.cjs` (per-engine capability rows), `ladder-unit.cjs`
-(engine-ladder logic), `reply-roundtrip.cjs` (drives a real reply and reports the
-captured `aiTextPlugin` payload plus the stored reasoning) and `find-caller.cjs`
-(names the caller of an `aiTextPlugin` call via `new Error().stack`). Run them in
-the FOREGROUND — a harness that backgrounds them behind a closed stdin can kill the
+(engine-ladder logic), `batch-unit.cjs` (perch_batch contracts against stubbed
+dispatch), `reply-roundtrip.cjs` (drives a real reply and reports the captured
+`aiTextPlugin` payload plus the stored reasoning) and `find-caller.cjs` (names the
+caller of an `aiTextPlugin` call via `new Error().stack`). Run them in the
+FOREGROUND — a harness that backgrounds them behind a closed stdin can kill the
 browser launch instantly (`stdin is not a tty`). `test/` is git-ignored, so none of
 it is published.
 

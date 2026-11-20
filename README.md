@@ -2,7 +2,7 @@
 
 An MCP server that gives an AI agent real, bidirectional control of a
 [Perchance.org](https://perchance.org) generator: read its source, edit it,
-drive its live UI, and read its console — all through 29 tools over stdio,
+drive its live UI, and read its console — all through 31 tools over stdio,
 speaking the current MCP specification (`2026-07-28`, the stateless "v2"
 protocol).
 
@@ -11,7 +11,7 @@ Two distinct code paths, deliberately:
 | Path | Tools | Cost | Cloudflare |
 |---|---|---|---|
 | **Browser-free** | `perch_pull`, `perch_fetch_generator`, `perch_src`, `perch_list_src` | ~1s | none — uses `curl` |
-| **Live editor** | `perch_start` + the other 25 | ~2.7s start, then 1–20ms/call | mitigated |
+| **Live editor** | `perch_start` + the other 27 | ~2.7s start, then 1–20ms/call | mitigated |
 
 Reads should almost always use the browser-free path. The browser exists for
 edits, `eval`, and UI testing.
@@ -177,7 +177,7 @@ Full recipe, collab/publish semantics, and the Cloudflare ladder:
 
 ## The tool set
 
-30 tools. All return JSON with an `ok` boolean and an `ms` timing field.
+31 tools. All return JSON with an `ok` boolean and an `ms` timing field.
 
 | Group | Tools |
 | --- | --- |
