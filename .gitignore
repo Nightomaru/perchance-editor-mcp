@@ -4,6 +4,9 @@ node_modules/
 # generated at runtime by perch_pull / perch_fetch_generator
 .perch-mirror/
 
+# browser profile for the public upload tools (holds the anonymous antiBotKey)
+.perch-upload-profile/
+
 # screenshots written by perch_shot
 perch_shot.png
 *.shot.png

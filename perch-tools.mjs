@@ -5,6 +5,7 @@
 import { createRequire } from "node:module";
 const require = createRequire(import.meta.url);
 const { PerchSession } = require("./perch-core.js");
+const { publicUploader } = require("./perch-upload.js");
 
 export const session = new PerchSession();
 
@@ -391,6 +392,35 @@ export const TOOLS = [
     },
   },
   {
+    name: "perch_upload_file",
+    description:
+      "Upload a file to Perchance's PUBLIC uploader (perchance.org/upload) and get a public URL — NOT the editor src/ store: no generator, no collab key, no owner save. Files are anonymous and accessible to ANYONE with the link — never upload secrets or personal data. First call launches a dedicated visible patchright-chromium window (headed is mandatory to pass Cloudflare + Turnstile; keep it visible, not minimized/occluded) and keeps it warm ~20 min. Source precedence: filePath > url > content. filePath is read server-side byte-exact (nothing transits the conversation); url is fetched by Perchance's SERVER directly (no local download); content is small inline text only. expires raises the server's max size / daily quota (1d ~400x, 1y ~20x); deletion after expiry is not guaranteed instant. Identical bytes dedup to the same URL (fileAlreadyExisted:true). Returns {url, fileId, deletionKey, size, expiresAt, deleteExpiresAt, integrity:{status,bytes,sha256,match}} — integrity is a real readback of the public URL, hash-compared against the local bytes (match:null for url sources). Delete rights last 3 days (perch_delete_file); after that storage is permanent unless an expiry was set. WebP is much smaller than PNG for transparency — convert big PNGs before uploading.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        filePath: { type: "string", description: "Absolute local path, read server-side byte-exact — preferred for images/binaries; nothing transits the conversation" },
+        url: { type: "string", description: "https URL — Perchance's server fetches and stores it directly (no local download; integrity.match will be null)" },
+        content: { type: "string", description: "Small inline text content (transits the conversation — prefer filePath/url for anything big or binary)" },
+        name: { type: "string", description: "Stored file name. Default: basename of filePath, last URL segment, or upload.txt" },
+        expires: { type: "string", enum: ["never", "1h", "1d", "1w", "1mo", "3mo", "1y"], description: "File expiry. Default never (= permanent after the 3-day delete window). Setting an expiry raises max file size and daily allowance: 1d ~400x, 1y ~20x. The file MAY outlive the set expiry." },
+      },
+      required: [],
+    },
+  },
+  {
+    name: "perch_delete_file",
+    description:
+      "Delete a file uploaded via perch_upload_file (the PUBLIC uploader — not editor src/; that's perch_delete_src). Pass the fileId + deletionKey from the upload result. Delete rights expire 3 days after upload; afterwards the file is permanent unless an expiry was set. Deletion propagates through caches — fully gone within ~a day. Deleting also clears the content-hash dedup entry, so re-uploading the same bytes afterwards creates a fresh file with fresh delete rights.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        fileId: { type: "string", description: "fileId from perch_upload_file's result (the content hash in the URL)" },
+        deletionKey: { type: "string", description: "deletionKey from perch_upload_file's result" },
+      },
+      required: ["fileId", "deletionKey"],
+    },
+  },
+  {
     name: "perch_batch",
     description:
       "Chain multiple UI actions in ONE call. Each step runs in-process (no per-step agent round-trip - that round-trip, not the click itself, is where the latency lives). steps: [{action, ...that tool's args FLAT}], e.g. [{action:'eval', js:'window.csPagerGoTo(2)'},{action:'wait', selector:'#starterCharacterList .character'},{action:'click', selector:'#starterCharacterList .character', nth:0},{action:'wait', selector:'#messageInput'},{action:'eval', js:'(async()=>{const c=await window.db.characters.toArray();return c.map(x=>x.name)})()'}]. Chainable actions: click, hover, type, press, eval, wait, shot, snapshot, errors, console, status, grep, read, refresh. Lifecycle (start/stop/navigate) and pane-write/asset tools stay solo. The whole chain is validated BEFORE anything executes. Stops at the first failed step unless continueOnError:true. stepDelayMs pauses between steps (default 0; use it or wait steps for UI transitions - perch_wait has no plain ms sleep). Each step result is truncated to maxResultChars (default 4000). timeoutMs is the whole-chain budget (default 120000); a timed-out step's underlying browser action may still complete, so probe state before retrying. Returns {ok, completed, total, steps:[{i, action, ok, ms, result|error}], ms}.",
@@ -455,6 +485,8 @@ export const DISPATCH = {
   perch_navigate: (a) => session.navigate(a),
   perch_upload_src: (a) => session.uploadSrc(a),
   perch_delete_src: (a) => session.deleteSrc(a),
+  perch_upload_file: (a) => publicUploader.upload(a),
+  perch_delete_file: (a) => publicUploader.delete(a),
 };
 
 // ----------------------------- batch chaining -----------------------------
