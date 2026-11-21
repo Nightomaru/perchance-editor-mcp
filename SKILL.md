@@ -1,7 +1,7 @@
 ---
 name: perchance-editor
 description: Read, patch, and live-test Perchance generators over MCP.
-version: 2.6.0
+version: 2.7.0
 author: Nightomaru, Hermes Agent
 license: MIT
 platforms: [linux, macos, windows]
@@ -126,6 +126,39 @@ is rejected up front.
 | `chromium` | headed only | boots | same as `chrome` |
 | `patchright` | never — the platform's editor globals never publish, so docs cannot be read or written | boots, but the app's globals stay undefined | no |
 
+**Refreshing the preview (server v2.5.0).** `perch_refresh` has two modes.
+`mode:'hot'` (default) = `editor.updateOutput()` in the editor frame — the
+platform's in-place hot-update: no navigation, no CF, ~0.7s. Fine for
+HTML/CSS/text changes, but a generator-SCRIPT change does NOT take effect: the
+platform's script re-runner re-declares the generator's top-level `let/const`
+against the bindings the initial page load created, the new script dies at parse
+time ("redeclaration of let/const …" followed by
+`can't access property … __variableNamesToHoistOutOfBlockScope_<id>` shim
+crashes) and the old code keeps running — those errors are real failures, not
+noise.
+
+`mode:'rebuild'` = working-copy rebuild, the way to apply script edits without
+an owner save: perch-mcp pre-wraps the room template's inline scripts in the
+platform's re-execution-safe `with(window.root.___proxyTarget.obj){…}` form and
+posts the platform's own `command:"updateOutput"` message — the preview then
+renders AND runs the editor's current panes (collab room bytes included) in
+~1.2s. No navigation, no CF. Pass `probeJs` to verify a new global in the same
+call. Completion is proven via the frame's
+`document.__perchanceInternal.renderedContentStamp`/`renderReceipt`; identical
+bytes make the platform's dedup skip the re-render, reported as
+`alreadyCurrent:true` (a success). Caveats: rebuild is ADDITIVE for globals —
+functions/consts from REMOVED code linger on `window` until a real page load;
+the template head is included so styles land; vendor `<script src>` tags re-run
+and may log transient load warnings before the src layer/fallbacks serve them.
+
+NEVER drive the navigational full refresh from automation
+(`hardReloadOutputIframe`, `editor.updateOutput({fullRefresh:true})`): the
+cross-subdomain navigation gets CF-punished into a WHOLE-BROWSER wedge
+(re-confirmed 2026-11-21 — even `perch_status` stops answering; recovery is
+killing the browser process tree), and the init handoff serves `app.data` (the
+SAVED generator) rather than the room bytes anyway (measured: frame stamp
+136559 vs editor doc 136778).
+
 **The preview did not boot.** `"This generator could not start because its file
 loader did not become available."` in the preview frame means the platform's own
 dependency loader never arrived: the app did not boot, so every `perch_eval` /
@@ -187,9 +220,11 @@ saves even when everything under it is tombstoned.
   text — replaying round-by-round diffs double-applies or fails.
 - After any pane write: `perch_refresh`, then `perch_errors`. `syntaxErrors: null`
   never covers runtime errors, and a scripted replacement that drops a `var` still
-  passes `node --check`. Expect `redeclaration of const ...` runtime errors after
-  a hot-update: the platform re-evals the generator script in the live frame —
-  editing-time noise, not a bytes defect.
+  passes `node --check`. `redeclaration of let/const ...` runtime errors after a
+  hot-update are NOT noise: the platform's script re-runner cannot re-declare the
+  generator's top-level bindings, so the new script dies and the OLD code keeps
+  running — use `perch_refresh {mode:'rebuild'}` to actually apply script edits
+  (see Refreshing the preview under Procedure).
 - `perch_eval` callbacks are serialized — only `arg` is in scope. Keep evals
   synchronous or fully guarded: a throw inside `setTimeout` leaves the promise
   pending until the tool times out.

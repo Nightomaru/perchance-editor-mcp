@@ -177,8 +177,18 @@ export const TOOLS = [
   },
   {
     name: "perch_refresh",
-    description: "Hard-reload the live preview and report syntax errors, runtime errors and new console lines.",
-    inputSchema: { type: "object", properties: {}, required: [] },
+    description:
+      "Reload the live preview. mode:'hot' (default) = the platform's in-place hot-update (~0.7s, no navigation) - good for HTML/CSS/text-only changes, but a generator-SCRIPT change dies in the platform's script re-runner (top-level let redeclaration) and the previous code keeps running. " +
+      "mode:'rebuild' = working-copy rebuild WITHOUT navigation: pre-wraps the room template's inline scripts in the re-execution-safe form and posts the platform's own updateOutput message, so the preview runs the editor's latest UNSAVED panes (collab rooms included) - the only mode that reliably applies script edits (main.pjs logic or inline JS in index.html). Does not touch saved state. " +
+      "probeJs (rebuild only): a JS expression evaluated in the preview after the rebuild and returned as `probe` - one-call verification that the new code is live (e.g. \"typeof myNewGlobal === 'function'\"). Reports render confirmation, preview health, runtime errors and new console lines.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        mode: { type: "string", enum: ["hot", "rebuild"], description: "Default 'hot'. Use 'rebuild' after editing the generator's script, or whenever the preview must run the room's latest bytes (collab rooms included)." },
+        probeJs: { type: "string", description: "JS expression evaluated in the preview after a rebuild, returned as probe. Ignored in hot mode." },
+      },
+      required: [],
+    },
   },
   {
     name: "perch_console",
@@ -466,7 +476,7 @@ export const DISPATCH = {
   perch_write_file: (a) => session.writeFile(a),
   perch_outline: (a) => session.outline(a),
   perch_copy_lines: (a) => session.copyLines(a),
-  perch_refresh: () => session.refresh(),
+  perch_refresh: (a) => session.refresh(a),
   perch_console: (a) => session.console(a),
   perch_errors: (a) => session.errors(a),
   perch_eval: (a) => session.eval(a),

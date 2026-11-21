@@ -910,19 +910,192 @@ class PerchSession {
     }
   }
 
-  async refresh() {
+  async refresh({ mode = 'hot', probeJs = null } = {}) {
     if (!this.page) throw new Error('call perch_start first');
     this._touch();
     const before = this.diag.console.length;
-    // Reload strategy (2026-11 revision): the navigational reloads (hardReloadOutputIframe,
-    // editor.handleReloadButtonClick) send the preview iframe on a FRESH cross-subdomain
-    // navigation, which Cloudflare punishes with an endless loader — and one hung preview
-    // eval can wedge this single-threaded server for good (observed 2026-11-08). The
-    // platform's own hot-update, editor.updateOutput(), pushes the room's current HTML into
-    // the live preview IN PLACE (the same path typing uses): no navigation, no CF. It is
-    // tier 1 now; the hard reload is only a fallback. Every preview eval is raced with a
-    // short cap so nothing here can wedge the server again.
     const race = (p, ms) => Promise.race([Promise.resolve(p), new Promise((res) => setTimeout(() => res(undefined), ms))]);
+
+    if (mode === 'rebuild') {
+      // Working-copy rebuild (added 2026-11-21): make the running preview
+      // execute the editor's CURRENT panes (collab room bytes included) without
+      // an owner save and WITHOUT navigating the iframe.
+      //
+      // Why not the obvious paths (all measured live on 2026-11-21):
+      //   * editor.updateOutput() (the hot path below) DOES deliver the room
+      //     bytes and the platform re-renders the DOM — but its script runner
+      //     (PERCH.executeScriptTag, debug variant: withExportDebug) hoists the
+      //     generator's top-level `let`s to script top level, which collides
+      //     with the bindings the INITIAL page load created ("redeclaration of
+      //     let/const …", then the shim hoist-back scripts crash on the
+      //     never-created __variableNamesToHoistOutOfBlockScope_<id>) — the new
+      //     script dies at parse time and the old code keeps running.
+      //   * the navigational full refresh (hardReloadOutputIframe /
+      //     editor.updateOutput({fullRefresh:true})) re-boots the preview from a
+      //     fresh cross-subdomain navigation — Cloudflare wedges the whole
+      //     automated browser on it (2026-11-08 note confirmed again today),
+      //     and the init handoff serves app.data (the SAVED generator), not the
+      //     room bytes (frame stamp otLen 136559 vs editor doc 136778).
+      //
+      // The fix: pre-wrap the room template's inline <script> bodies in the
+      // platform's own NON-debug re-execution-safe form
+      // (`with(window.root.___proxyTarget.obj){ …script…; hoist loop }` — consts
+      // stay block-scoped, plain function declarations re-declare legally, the
+      // hoist loop copies let/const values onto window), then post the
+      // platform's own `command:"updateOutput"` message with that template.
+      // The debug runner now finds NO top-level declarations in the wrapped
+      // text — nothing collides — and the inner wrap runs the room's code.
+      const postUpdate = await race(evalMain(this.page, () => {
+        const editorsReady = (async () => {
+          for (let i = 0; i < 150 && !(window.outputTemplateEditor && window.modelTextEditor); i++) {
+            await new Promise((r) => setTimeout(r, 100));
+          }
+          if (!(window.outputTemplateEditor && window.modelTextEditor)) {
+            throw new Error('editor text panels still initializing');
+          }
+        })();
+        return editorsReady.then(async () => {
+          const ot = window.outputTemplateEditor.getValue();
+          const mt = window.modelTextEditor.getValue();
+          const doc = new DOMParser().parseFromString(ot, 'text/html');
+          const idOk = (n) => /^[A-Za-z_$][\w$]*$/.test(n);
+          const hoistNames = (text) => {
+            const names = new Set();
+            for (const m of text.matchAll(/[\s;](?:let|const)\s+([^\s]+?)\s*=/g)) names.add(m[1]);
+            for (const m of text.matchAll(/[\s;](?:async function)\*?\s+([^\s]+?)\s*\(/g)) names.add(m[1]);
+            for (const m of text.matchAll(/[\s;]class\s+([^\s]+?)\s*\{/g)) names.add(m[1]);
+            return [...names].filter(idOk);
+          };
+          let wrappedScripts = 0;
+          for (const s of [...doc.querySelectorAll('script')]) {
+            if (s.src) continue;
+            const type = (s.getAttribute('type') || '').toLowerCase();
+            if (type === 'module' || (type && type !== 'text/javascript')) continue;
+            const text = s.textContent || '';
+            if (!text.trim()) continue;
+            s.textContent = '\nwith(window.root.___proxyTarget.obj){\n' + text +
+              '\n;for (let name of ' + JSON.stringify(hoistNames(text)) + ') { try { let val = eval(name); window[name] = val; } catch(e) {} }\n}\n';
+            wrappedScripts++;
+          }
+          const bodyAttrs = [...doc.body.attributes].map((a) => a.name + '="' + a.value + '"').join(' ');
+          // Keep the template's HEAD (styles, preloads, vendor scripts): the
+          // platform assigns the whole template string to the container's
+          // innerHTML, which flattens head children into it — dropping them
+          // here would strip the generator's <style> blocks on every rebuild.
+          const wrappedOt = '<!DOCTYPE html><html><head>' + doc.head.innerHTML + '</head><body' + (bodyAttrs ? ' ' + bodyAttrs : '') + '>' +
+            doc.body.innerHTML + '</body></html>';
+          const iframe = document.querySelector('#output iframe') || (window.editor && window.editor.outputIframe);
+          if (!iframe || !iframe.contentWindow) throw new Error('output iframe not found');
+          const generator = { modelText: mt, outputTemplate: wrappedOt, name: (window.app && app.data && app.data.generator && app.data.generator.name) || window.generatorName || '' };
+          // The frame runs PERCH.src.setState(manifest) with whatever lands in
+          // this message — an EMPTY manifest wipes its src table (measured
+          // 2026-11-21: trace setState n:32 at boot → n:0 after a rebuild,
+          // breaking SW-served src/vendor assets and the ai-text embed's first
+          // load). The room src state syncs from the collab server lazily, so
+          // manifestForIframe()/app.data can BOTH be {} minutes after a start;
+          // poll briefly for a non-empty manifest before sending.
+          let manifest = null;
+          for (let i = 0; i < 40; i++) {
+            try { manifest = window.srcState ? window.srcState.manifestForIframe() : null; } catch (e) {}
+            if (!manifest || !Object.keys(manifest).length) {
+              manifest = (window.app && app.data && app.data.generator && app.data.generator.srcManifest) || null;
+            }
+            if (manifest && Object.keys(manifest).length) break;
+            manifest = null;
+            await new Promise((r) => setTimeout(r, 400));
+          }
+          generator.srcManifest = manifest || {};
+          if (typeof getGeneratorSourceRevision2 === 'function') {
+            generator.generatorSourceRevision = await getGeneratorSourceRevision2(generator);
+          }
+          const generatorIsUnsaved = generator.modelText !== window.lastModelTextSaved || wrappedOt !== window.lastOutputTemplateSaved;
+          iframe.contentWindow.postMessage({
+            command: 'updateOutput',
+            generator,
+            dependencies: (window.app && app.data && Array.isArray(app.data.dependencies)) ? app.data.dependencies : [],
+            generatorIsUnsaved,
+            srcHasPending: !!(window.srcState && window.srcState.hasPending && window.srcState.hasPending()),
+            srcVoteSavedLastEditTime: (!generatorIsUnsaved && (window.srcStateLoaded ? !window.srcState.isDirty() : !window.srcState) && Number.isSafeInteger(window.generatorLastSaveTime)) ? window.generatorLastSaveTime : null,
+            agentPreambleJs: window.__aiAgentPreambleJs || undefined,
+            agentRafShimJs: window.__aiAgentRafShimJs || undefined,
+          }, 'https://' + String(window.generatorPublicId) + '.perchance.org');
+          return { ok: true, posted: true, wrappedScripts, wrappedOtLen: wrappedOt.length, srcManifestCount: Object.keys(generator.srcManifest || {}).length, sentAt: Date.now() };
+        });
+      }), 30000).catch((e) => ({ ok: false, error: String((e && e.message) || e).slice(0, 200) }));
+
+      // Wait for the platform to render the wrapped template: the frame stamps
+      // document.__perchanceInternal.renderedContentStamp with the delivered
+      // template's length and sets __renderStage='done' at the end of
+      // PERCH.updateOutput. (The receipt also carries a SHA-256 revision, but
+      // the length + fresh timestamp is enough to prove THIS render.)
+      let rendered = false;
+      let alreadyCurrent = false; // dedup: identical bytes were already rendered, the platform skips re-rendering
+      let renderState = null;
+      if (postUpdate && postUpdate.ok) {
+        const sentAt = postUpdate.sentAt;
+        const wantLen = postUpdate.wrappedOtLen;
+        const t0 = Date.now();
+        while (Date.now() - t0 < 40000) {
+          renderState = await race(evalMain(await this._frame('preview').catch(() => null), () => {
+            const pi = document.__perchanceInternal || {};
+            return {
+              otLen: (pi.renderedContentStamp || {}).otLen || null,
+              stage: pi.__renderStage || null,
+              receiptT: (pi.renderReceipt || {}).t || null,
+              editorDataLoadFailed: pi.editorDataLoadFailed || null,
+            };
+          }), 4000).catch(() => null);
+          if (renderState && renderState.otLen === wantLen && renderState.stage === 'done') {
+            if (renderState.receiptT && renderState.receiptT >= sentAt) {
+              rendered = true;
+            } else {
+              alreadyCurrent = true; // fresh receipt never came — the frame's dedup judged the content identical
+            }
+            break;
+          }
+          await this.page.waitForTimeout(500);
+        }
+        if (rendered) {
+          await this.page.waitForTimeout(600); // let the freshly executed scripts finish wiring
+        }
+      }
+      const health = await this.previewHealth().catch(() => null);
+      let probe = null;
+      if (probeJs) {
+        const fr = await this._frame('preview').catch(() => null);
+        probe = fr
+          ? await race(evalMain(fr, probeJs), 8000)
+            .then((result) => ({ ok: true, result }))
+            .catch((e) => ({ ok: false, error: String((e && e.message) || e).slice(0, 200) }))
+          : { ok: false, error: 'preview frame not found after rebuild' };
+      }
+      return {
+        ok: !!(postUpdate && postUpdate.ok) && (rendered || alreadyCurrent),
+        via: 'working-copy-rebuild',
+        posted: postUpdate || null,
+        rendered,
+        alreadyCurrent,
+        renderState: renderState || null,
+        preview: health,
+        probe,
+        ...(alreadyCurrent ? { note: 'the preview already runs these exact bytes (platform dedup skipped the re-render)' } : {}),
+        ...(postUpdate && postUpdate.ok && !rendered && !alreadyCurrent ? {
+          warning: 'the update message was delivered but the frame never confirmed the render (check perch_errors; src service-worker handoff or a generator script error can stall it)',
+        } : {}),
+        runtimeErrors: this.diag.errors.slice(-30),
+        newConsoleLines: this.diag.console.slice(before).slice(-40),
+        panel: await this._readConsole(),
+      };
+    }
+
+    // In-place hot update (mode:'hot', default): editor.updateOutput() answers
+    // the preview's pending update request — the same path typing uses. No
+    // navigation, no CF, ~0.7s, so it cannot wedge the server. Caveat (see the
+    // rebuild branch above): it re-evals the generator script in the LIVE
+    // frame, so top-level const/function redeclarations throw and the PREVIOUS
+    // code keeps running — HTML/CSS/text changes land, script changes do not.
+    // (The hard reload below stays as a fallback for editor builds without
+    // updateOutput; prefer mode:'rebuild' when a script edit must go live.)
     let via = 'update-output';
     const updated = await race(evalMain(this.page, () => {
       try {
