@@ -48,8 +48,8 @@ to edit first.
 ```
 perch_pull {name}                     # mirror both panes locally, ~1s, no browser
 read_file / search_files              # work the mirror at full speed
-perch_start {name, collabKey, headed} # browser + live editor
-perch_status                          # docsReady, line counts, preview health
+perch_start {name, collabKey, headed} # browser + live editor + full status snapshot
+perch_status                          # mid-session checks only — start already reports it
 perch_read / perch_grep               # confirm the live doc is what you assume
 perch_patch {changes: [...]}          # edit (batch; settle once at the end)
 perch_status → perch_errors           # saveState, syntax + runtime errors
@@ -62,7 +62,7 @@ perch_stop
 | Group | Tools | Quirks that matter |
 |---|---|---|
 | Browser-free | `perch_pull`, `perch_fetch_generator`, `perch_src`, `perch_list_src` | `perch_list_src` shows the last OWNER save only — blind to the collab room |
-| Session | `perch_start`, `perch_status`, `perch_stop` | `perch_status` is cheap (~2ms) and carries the preview health — call it liberally |
+| Session | `perch_start`, `perch_status`, `perch_stop` | `perch_start` embeds the full status snapshot (saveState, syntaxErrors, collabSynced, line counts, buffered console/errors, preview health) after every load (2026-11-22) — no follow-up `perch_status` needed after a cold start; `perch_status` stays for mid-session checks (~2ms) |
 | Recovery / src | `perch_navigate`, `perch_upload_src`, `perch_delete_src` | prefer `filePath`/`url` over inline `content`; binary-vs-text is content-sniffed; results carry `landed`/`integrity`/`sha256`; `perch_delete_src` takes files OR whole folders (auto-detected) and writes room-registry tombstones so published-file deletes survive reloads/owner save — run headed |
 | Public upload | `perch_upload_file`, `perch_delete_file` | own HEADED patchright window (only engine that passes CF+Turnstile on the upload embed); anonymous link-public files; source precedence `filePath` > `url` > `content`; `expires` enum; integrity readback hash-compared; 3-day delete window; see the "Public file upload" section |
 | Reading | `perch_read`, `perch_grep`, `perch_outline`, `perch_console`, `perch_errors`, `perch_snapshot` | `perch_read` takes offset/limit (1-indexed); lines >800 chars are cut and counted in `linesTruncated` — anchor exact-text edits from grep or the mirror, not a truncated read |

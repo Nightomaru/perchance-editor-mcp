@@ -149,7 +149,7 @@ outlast short ceilings.
 1. perch_pull   {name: "minimal"}                      # source to local files, ~1s
 2. read/grep the local files                           # full speed, no browser
 3. perch_start  {name: "minimal"}                      # launch browser, load editor
-4. perch_status                                        # confirm docsReady
+4. perch_status                                        # mid-session only — perch_start's response already carries the full status snapshot
 5. perch_eval  {js: "document.title"}                  # sanity-check the frame
 6. perch_patch {changes: [...]}                        # make your edits
    perch_write_file {pane, filePath}                    # ...or replace a whole pane byte-exact from a local file

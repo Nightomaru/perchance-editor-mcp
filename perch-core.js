@@ -606,8 +606,15 @@ class PerchSession {
     this.ready = !!(st.hasOutputView && st.hasModelView && !st.cfBlocked);
     const preview = r.preview || st.preview || null;
     const previewDead = !!(preview && preview.found && !preview.healthy);
+    // Post-load status eval (2026-11-22): status() already probes the editor
+    // page right after the ladder confirms — carry its FULL snapshot
+    // (saveState, syntaxErrors, collabSynced, modelLines/outputLines,
+    // buffered console/errors) in the response instead of dropping it, so a
+    // cold start needs no follow-up perch_status call. Zero added latency:
+    // it is the same eval, previously computed and discarded.
     return {
-      ok: true, generator: name, collabKey, url, headed: this.headed, engine: this.engine,
+      ok: true, ...st,
+      generator: name, collabKey, url, headed: this.headed, engine: this.engine,
       effectiveEngine: this.effectiveEngine || this.engine,
       docsReady: st.hasOutputView, recoveryStep: r.step, attempts: r.attempts, ms: Date.now() - t0,
       engineChain: chain,

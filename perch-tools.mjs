@@ -17,7 +17,7 @@ export const TOOLS = [
   {
     name: "perch_start",
     description:
-      "Start the Perchance editor session: launch the browser and load the given generator with its collab key, ready to edit — one call. Handles Cloudflare automatically (steps inside an engine, then the next engine in engineChain). Re-calling with the same generator/collabKey is a fast no-op. Omit collabKey for a non-collab edit (must own the generator). Reports the PREVIEW's health too: the editor page can be fine while the generator frame never boots ('This generator could not start because its file loader did not become available') — in that case the ladder has already tried the other engines, and the result says previewDegraded.",
+      "Start the Perchance editor session: launch the browser and load the given generator with its collab key, ready to edit — one call. Handles Cloudflare automatically (steps inside an engine, then the next engine in engineChain). Re-calling with the same generator/collabKey is a fast no-op. Omit collabKey for a non-collab edit (must own the generator). Reports the PREVIEW's health too: the editor page can be fine while the generator frame never boots ('This generator could not start because its file loader did not become available') — in that case the ladder has already tried the other engines, and the result says previewDegraded. The response embeds the FULL status snapshot (saveState, syntaxErrors, collabSynced, modelLines/outputLines, buffered console/error counts, preview health) from the status eval that runs right after the editor confirms — a cold start needs no follow-up perch_status call; perch_status remains for mid-session checks.",
     inputSchema: {
       type: "object",
       properties: {
