@@ -250,13 +250,14 @@ export const TOOLS = [
   },
   {
     name: "perch_click",
-    description: "Click an element in the live preview (or editor chrome). selector: CSS selector or 'text=Visible Text'.",
+    description: "Click an element in the live preview (or editor chrome). selector: CSS selector or 'text=Visible Text'. force:true skips Playwright actionability waits (still a real trusted click) — needed for the editor's continuously-re-rendered popups.",
     inputSchema: {
       type: "object",
       properties: {
         selector: { type: "string", description: "CSS selector or 'text=...'" },
         frame: { ...FRAME, description: "Default preview" },
         nth: { type: "integer", description: "Click the Nth match instead of the first" },
+        force: { type: "boolean", description: "Skip actionability checks (stable/receives-events) — still a trusted CDP click. Default false" },
         timeout: { type: "integer", description: "ms. Default 10000" },
       },
       required: ["selector"],
@@ -391,11 +392,12 @@ export const TOOLS = [
   },
   {
     name: "perch_delete_src",
-    description: "Delete a file from the generator's src/ via the editor's file tree (⋯ → 🗑️ delete → confirm). Staged in the editor store; the deletion goes public when the generator's owner saves. Pass the path the file lives under, e.g. AGENTS.md or emoji/old.svg.",
+    description: "Delete a file OR a whole folder from the generator's src/ via the editor's file tree (⋯ → 🗑️ delete → confirm). Folders are auto-detected from the tree (or force with folder:true) and delete every file under them in one operation. Staged in the editor store; the deletion goes public when the generator's owner saves. Pass the path, e.g. AGENTS.md, emoji/old.svg, or pixi-skills for the whole folder.",
     inputSchema: {
       type: "object",
       properties: {
-        path: { type: "string", description: "src path, e.g. AGENTS.md or emoji/old.svg" },
+        path: { type: "string", description: "src path, e.g. AGENTS.md, emoji/old.svg, or a folder name like pixi-skills (deletes all children)" },
+        folder: { type: "boolean", description: "Force folder-delete semantics for this path (default: auto-detected from the file tree)" },
         timeout: { type: "integer", description: "ms to wait for the row to disappear. Default 20000" },
       },
       required: ["path"],

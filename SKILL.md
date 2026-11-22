@@ -1,7 +1,7 @@
 ---
 name: perchance-editor
 description: Read, patch, and live-test Perchance generators over MCP.
-version: 2.7.0
+version: 2.8.0
 author: Nightomaru, Hermes Agent
 license: MIT
 platforms: [linux, macos, windows]
@@ -63,7 +63,7 @@ perch_stop
 |---|---|---|
 | Browser-free | `perch_pull`, `perch_fetch_generator`, `perch_src`, `perch_list_src` | `perch_list_src` shows the last OWNER save only — blind to the collab room |
 | Session | `perch_start`, `perch_status`, `perch_stop` | `perch_status` is cheap (~2ms) and carries the preview health — call it liberally |
-| Recovery / src | `perch_navigate`, `perch_upload_src`, `perch_delete_src` | prefer `filePath`/`url` over inline `content`; binary-vs-text is content-sniffed; results carry `landed`/`integrity`/`sha256`; deletes need a REAL firefox click (trusted gesture), so run headed |
+| Recovery / src | `perch_navigate`, `perch_upload_src`, `perch_delete_src` | prefer `filePath`/`url` over inline `content`; binary-vs-text is content-sniffed; results carry `landed`/`integrity`/`sha256`; `perch_delete_src` takes files OR whole folders (auto-detected) and writes room-registry tombstones so published-file deletes survive reloads/owner save — run headed |
 | Public upload | `perch_upload_file`, `perch_delete_file` | own HEADED patchright window (only engine that passes CF+Turnstile on the upload embed); anonymous link-public files; source precedence `filePath` > `url` > `content`; `expires` enum; integrity readback hash-compared; 3-day delete window; see the "Public file upload" section |
 | Reading | `perch_read`, `perch_grep`, `perch_outline`, `perch_console`, `perch_errors`, `perch_snapshot` | `perch_read` takes offset/limit (1-indexed); lines >800 chars are cut and counted in `linesTruncated` — anchor exact-text edits from grep or the mirror, not a truncated read |
 | Writing | `perch_patch` (preferred, batch), `perch_edit`, `perch_write`, `perch_write_file`, `perch_copy_lines` | `perch_write_file` is the only path that carries a multi-MB outputTemplate; `oldString not found` → grep the real text first |
@@ -181,6 +181,25 @@ perch_eval {frame:"editor", js:"JSON.stringify(window.srcState?._internals?.work
 
 `deleted:true` is a staged tombstone; a folder row still renders until the owner
 saves even when everything under it is tombstoned.
+
+**2026-11-22: editor build changed — the src file flows were patched in perch-core.js.**
+The 2026-11 editor build (a) ignores bare `.click()` on tree rows and the row's ⋯ menu
+(handlers listen for pointer/mouse events — dispatch the full
+pointerover/mousedown/pointerup/mouseup/click sequence instead), and (b) re-renders its
+popups continuously, so Playwright actionability NEVER settles on the `🗑️ delete` item
+(perch_click got a `force` option for exactly this). Deeper platform fact, found by
+reading `perchance.org/lib/srcFiles.js`: `deleteFile` only writes a room-registry
+tombstone for PENDING files (`wasPending && wasRemoteOrigin`); deleting a PUBLISHED
+file is local-only and RESURRECTS on any fresh context and at the owner's save. The
+patched `deleteSrc` therefore writes the platform's own `{deleted:true, rev, tabId}`
+advert into the `___pendingSrc___` YMap itself for every target key (verifies with a
+read-back), and a receiving tab's `doApplyRemote` deletion branch removes published
+entries from `working` — so the tombstone survives fresh loads and the owner's save
+commits it. `deleteSrc` also auto-detects FOLDER paths (folder rows carry the same ⋯
+menu; the platform removes all children in one operation) and reports
+`folder`/`roomTombstones{written,already,verified}`/`childrenConfirmed`. Durability
+proof is a FRESH `perch_start` showing `working` shrunk — the tree row vanishing and
+`storeConfirmed` alone prove nothing across reloads.
 
 ## Pitfalls
 

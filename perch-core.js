@@ -1242,7 +1242,7 @@ class PerchSession {
     }
   }
 
-  async click({ selector, frame = 'preview', timeout = 10000, nth = null } = {}) {
+  async click({ selector, frame = 'preview', timeout = 10000, nth = null, force = false } = {}) {
     if (!this.page) throw new Error('call perch_start first');
     this._touch();
     if (!selector) throw new Error('missing selector');
@@ -1252,8 +1252,8 @@ class PerchSession {
       : fr.locator(selector);
     const target = nth != null ? loc.nth(nth) : loc.first();
     try {
-      await target.click({ timeout });
-      return { ok: true, clicked: selector, frame, matches: await loc.count().catch(() => null) };
+      await target.click({ timeout, force });
+      return { ok: true, clicked: selector, frame, force, matches: await loc.count().catch(() => null) };
     } catch (e) {
       return { ok: false, error: String((e && e.message) || e).slice(0, 200), matches: await loc.count().catch(() => 0) };
     }
@@ -1457,7 +1457,14 @@ class PerchSession {
     if (await inputVisible()) return true;
     try {
       await ed.locator('text=🗂 files').first().click({ timeout: 5000 });
-    } catch { return false; }
+    } catch {
+      // The real click can fail actionability on the editor chrome (2026-11 build);
+      // opening the panel is NOT gesture-gated — a synthetic click works (probed).
+      await evalMain(ed, () => {
+        const b = [...document.querySelectorAll('button')].find(b => (b.textContent || '').includes('🗂 files'));
+        if (b) b.click();
+      }).catch(() => {});
+    }
     await this.page.waitForTimeout(700);
     return inputVisible();
   }
@@ -1556,7 +1563,22 @@ class PerchSession {
       const segs = path.split('/');
       if (segs.length > 1) {
         const folderSpan = [...panel.querySelectorAll('span')].find(el => (el.textContent || '').trim() === '▸ 📁 ' + segs[0]);
-        if (folderSpan) { (folderSpan.closest('div') || folderSpan).click(); return { ok: true, found: false, expanded: true }; }
+        if (folderSpan) {
+          // full pointer sequence: the 2026-11 editor build ignores bare .click()
+          // on tree rows (handler listens for pointer/mouse events)
+          const el = folderSpan.closest('div') || folderSpan;
+          const r = el.getBoundingClientRect();
+          const x = r.x + r.width / 2, y = r.y + r.height / 2;
+          const opts = { bubbles: true, cancelable: true, clientX: x, clientY: y, button: 0, pointerId: 1, pointerType: 'mouse', isPrimary: true };
+          el.dispatchEvent(new PointerEvent('pointerover', opts));
+          el.dispatchEvent(new MouseEvent('mouseover', opts));
+          el.dispatchEvent(new PointerEvent('pointerdown', opts));
+          el.dispatchEvent(new MouseEvent('mousedown', opts));
+          el.dispatchEvent(new PointerEvent('pointerup', opts));
+          el.dispatchEvent(new MouseEvent('mouseup', opts));
+          el.dispatchEvent(new MouseEvent('click', opts));
+          return { ok: true, found: false, expanded: true };
+        }
       }
       return { ok: true, found: false };
     }, { path }).catch(e => ({ ok: false, error: String(e && e.message || e) }));
@@ -1568,7 +1590,9 @@ class PerchSession {
       if (!probe.ok) return { existed: false, error: probe.error };
       if (!probe.found) return { existed: false };
     }
-    // open the row's ⋯ menu (name-leaf anchored — see findRow above)
+    // open the row's ⋯ menu (name-leaf anchored — see findRow above).
+    // Full pointer sequence: the 2026-11 editor build's row-menu handler listens
+    // for pointer/mouse events — a bare el.click() no longer opens the menu.
     const menu = await evalMain(ed, ({ path }) => {
       const panel = document.querySelector('#aiAgentPanelEl');
       const fname = path.split('/').pop();
@@ -1578,7 +1602,19 @@ class PerchSession {
         let n = nameEl;
         while (n && n !== panel) {
           const btn = [...n.querySelectorAll('button')].find(b => (b.title || '').indexOf('download / rename / delete') !== -1);
-          if (btn) { btn.click(); return { ok: true }; }
+          if (btn) {
+            const r = btn.getBoundingClientRect();
+            const x = r.x + r.width / 2, y = r.y + r.height / 2;
+            const opts = { bubbles: true, cancelable: true, clientX: x, clientY: y, button: 0, pointerId: 1, pointerType: 'mouse', isPrimary: true };
+            btn.dispatchEvent(new PointerEvent('pointerover', opts));
+            btn.dispatchEvent(new MouseEvent('mouseover', opts));
+            btn.dispatchEvent(new PointerEvent('pointerdown', opts));
+            btn.dispatchEvent(new MouseEvent('mousedown', opts));
+            btn.dispatchEvent(new PointerEvent('pointerup', opts));
+            btn.dispatchEvent(new MouseEvent('mouseup', opts));
+            btn.dispatchEvent(new MouseEvent('click', opts));
+            return { ok: true };
+          }
           n = n.parentElement;
         }
       }
@@ -1591,9 +1627,25 @@ class PerchSession {
     // el.click() closes the menu without triggering its handler (observed:
     // the confirm modal never appears), while playwright's click works.
     try {
-      await ed.click('text=🗑️ delete', { timeout: 5000 });
+      await ed.click('text=🗑️ delete', { timeout: 2500 });
     } catch (e) {
-      return { existed: true, error: 'delete item not clickable (menu closed?)' };
+      // The 2026-11 editor's popup never passes Playwright's stability check
+      // (the platform re-renders it continuously) — a FORCE click is still a
+      // real trusted CDP gesture, it just skips the actionability waits.
+      try {
+        await ed.click('text=🗑️ delete', { timeout: 2500, force: true });
+      } catch (e2) {
+        // last resort: trusted CDP mouse click at the item's centre
+        const pt = await evalMain(ed, () => {
+          const el = [...document.querySelectorAll('div,span,button')].find(el =>
+            el.childElementCount === 0 && (el.textContent || '').trim() === '🗑️ delete');
+          if (!el) return null;
+          const r = el.getBoundingClientRect();
+          return { x: r.x + r.width / 2, y: r.y + r.height / 2 };
+        }).catch(() => null);
+        if (!pt) return { existed: true, error: 'delete item not found (menu closed?)' };
+        await this.page.mouse.click(pt.x, pt.y);
+      }
     }
     await this.page.waitForTimeout(700);
     // confirm modal inside the panel ("Delete src/…?"), ok is its last button
@@ -1608,7 +1660,19 @@ class PerchSession {
       const btns = [...ov.querySelectorAll('button')];
       const okBtn = btns.find(b => /^ok$/i.test((b.textContent || '').trim())) || btns[btns.length - 1];
       if (!okBtn) return { ok: false, error: 'confirm button not found' };
-      okBtn.click();
+      // full pointer sequence — the 2026-11 build's handlers listen for
+      // pointer/mouse events; a bare .click() can half-fire (local row removal
+      // without the room-registry tombstone write)
+      const r = okBtn.getBoundingClientRect();
+      const x = r.x + r.width / 2, y = r.y + r.height / 2;
+      const opts = { bubbles: true, cancelable: true, clientX: x, clientY: y, button: 0, pointerId: 1, pointerType: 'mouse', isPrimary: true };
+      okBtn.dispatchEvent(new PointerEvent('pointerover', opts));
+      okBtn.dispatchEvent(new MouseEvent('mouseover', opts));
+      okBtn.dispatchEvent(new PointerEvent('pointerdown', opts));
+      okBtn.dispatchEvent(new MouseEvent('mousedown', opts));
+      okBtn.dispatchEvent(new PointerEvent('pointerup', opts));
+      okBtn.dispatchEvent(new MouseEvent('mouseup', opts));
+      okBtn.dispatchEvent(new MouseEvent('click', opts));
       return { ok: true };
     });
     if (!confirm.ok) return { existed: true, error: confirm.error };
@@ -1638,50 +1702,131 @@ class PerchSession {
     return { existed: true, deleted: false, error: 'row still present after confirm (check the editor and retry)' };
   }
 
-  async deleteSrc({ path, timeout = 20000 } = {}) {
+  async deleteSrc({ path, timeout = 20000, folder = false } = {}) {
     if (!this.page) throw new Error('call perch_start first');
     this._touch();
     const bad = this._validSrcName(path);
     if (bad) return { ok: false, error: bad };
     const ed = await this._frame('editor');
     if (!(await this._ensureFilesPanel(ed))) return { ok: false, error: 'could not open the files panel' };
+    // Folder delete: the tree's folder rows carry the same ⋯ menu (⋯ → 🗑️ delete
+    // → confirm) and the platform removes every child in one operation. Auto-detect
+    // a folder row for this path unless the caller forced file semantics.
+    const isFolder = folder || await evalMain(ed, ({ path }) => {
+      const panel = document.querySelector('#aiAgentPanelEl');
+      if (!panel) return false;
+      return [...panel.querySelectorAll('span')].some(el => {
+        const t = (el.textContent || '').trim();
+        return t === '▸ 📁 ' + path || t === '▾ 📁 ' + path || t === '📁 ' + path;
+      });
+    }, { path }).catch(() => false);
+    // Capture the keys this delete must retire from the ROOM registry BEFORE the
+    // local flow runs. The 2026-11 editor only tombstones PENDING files itself
+    // (srcFiles.js deleteFile: wasPending && wasRemoteOrigin); deletes of
+    // PUBLISHED files stay local and resurrect on any fresh load / owner save.
+    const targetKeys = await evalMain(ed, ({ path, isFolder }) => {
+      const w = (window.srcState && window.srcState._internals && window.srcState._internals.working) || {};
+      let ym = null;
+      try { ym = (window.yjsProvider && window.yjsProvider.doc && window.yjsProvider.doc.share && window.yjsProvider.doc.share.get('___pendingSrc___')) || null; } catch (e) {}
+      const keys = new Set();
+      if (!isFolder) { keys.add(path); }
+      else {
+        const prefix = path + '/';
+        for (const k of Object.keys(w)) if (k.startsWith(prefix)) keys.add(k);
+        if (ym && ym.keys) { try { for (const k of ym.keys()) if (k.startsWith(prefix)) keys.add(k); } catch (e2) {} }
+      }
+      return [...keys];
+    }, { path, isFolder }).catch(() => isFolder ? [] : [path]);
     const r = await this._deleteSrcRow(ed, path, { timeout });
-    if (!r.existed) return { ok: false, error: 'src path not in the file tree: ' + path };
+    if (!r.existed && !targetKeys.length) return { ok: false, error: 'src path not in the file tree: ' + path };
     // store-level confirmation: the tree row can vanish while the room-synced
     // store still lists the path (or lists a {deleted:true} tombstone, which
     // counts as deleted). The registry settles a beat after the row disappears,
     // so poll briefly. null = store not observable (older editor build).
+    // For a FOLDER, every key under path/ must be gone or tombstoned — the flat
+    // store has no bare folder key, so the children are the truth.
     let storeConfirmed = null;
+    let childrenChecked = null;
     const scT0 = Date.now();
     while (Date.now() - scT0 < 6000) {
-      const st = await evalMain(ed, ({ path }) => {
+      const st = await evalMain(ed, ({ path, isFolder }) => {
         const w = window.srcState && window.srcState._internals && window.srcState._internals.working;
-        const e = w ? w[path] : null;
         // tombstones ({deleted:true}) live in the room registry YMap
-        let y = null;
+        let ym = null;
         try {
           const share = window.yjsProvider && window.yjsProvider.doc && window.yjsProvider.doc.share;
-          const m = share && share.get && share.get('___pendingSrc___');
-          if (m && m.get) y = m.get(path) || null;
+          ym = (share && share.get && share.get('___pendingSrc___')) || null;
         } catch (err) { /* older editor without the registry */ }
-        if (!e && !y) return { present: false };
-        return { present: true, deleted: !!((y && y.deleted) || (e && e.deleted)) };
-      }, { path }).catch(() => null);
+        const entryState = (key) => {
+          const e = w ? w[key] : null;
+          const y = ym && ym.get ? (ym.get(key) || null) : null;
+          if (!e && !y) return { present: false };
+          return { present: true, deleted: !!((y && y.deleted) || (e && e.deleted)) };
+        };
+        if (!isFolder) return entryState(path);
+        const prefix = path + '/';
+        const keys = new Set();
+        if (w) for (const k of Object.keys(w)) if (k.startsWith(prefix)) keys.add(k);
+        if (ym && ym.keys) { try { for (const k of ym.keys()) if (k.startsWith(prefix)) keys.add(k); } catch (e2) {} }
+        let live = 0;
+        for (const k of keys) { const s = entryState(k); if (s.present && !s.deleted) live++; }
+        const folderEntry = entryState(path);
+        const folderLive = folderEntry.present && !folderEntry.deleted;
+        return { present: live > 0 || folderLive, deleted: live === 0 && !folderLive, children: keys.size };
+      }, { path, isFolder }).catch(() => null);
       if (st) {
         storeConfirmed = !st.present || st.deleted === true;
+        if (isFolder) childrenChecked = st.children;
         if (storeConfirmed) break;
       }
       await this.page.waitForTimeout(800);
     }
-    const deleted = !!r.deleted && storeConfirmed !== false;
+    // Room-durable tombstones: write the platform's own {deleted:true} advert for
+    // every target the UI flow did not tombstone (published-file deletes). Format
+    // matches srcFiles.js roomSync publishes: {deleted, rev, tabId}; a receiving
+    // tab applies it through doApplyRemote's deletion branch, which removes
+    // PUBLISHED entries from working too — so the owner's save commits the delete.
+    let roomTombstones = null;
+    if (targetKeys.length) {
+      roomTombstones = await evalMain(ed, ({ keys }) => {
+        let ym = null;
+        try { ym = (window.yjsProvider && window.yjsProvider.doc && window.yjsProvider.doc.share && window.yjsProvider.doc.share.get('___pendingSrc___')) || null; } catch (e) {}
+        if (!ym || !ym.set) return { ok: false, error: 'room src registry not observable' };
+        let written = 0, already = 0;
+        const tabId = 'perch-' + Math.random().toString(36).slice(2);
+        for (const k of keys) {
+          const cur = ym.get ? ym.get(k) : null;
+          if (cur && cur.deleted) { already++; continue; }
+          ym.set(k, { deleted: true, rev: 'rd-' + Date.now().toString(36) + '-' + Math.random().toString(36).slice(2, 6), tabId });
+          written++;
+        }
+        return { ok: true, written, already };
+      }, { keys: targetKeys }).catch(e => ({ ok: false, error: String((e && e.message) || e) }));
+      if (roomTombstones && roomTombstones.ok) {
+        await this.page.waitForTimeout(400);
+        roomTombstones.verified = await evalMain(ed, ({ keys }) => {
+          let ym = null;
+          try { ym = (window.yjsProvider && window.yjsProvider.doc && window.yjsProvider.doc.share && window.yjsProvider.doc.share.get('___pendingSrc___')) || null; } catch (e) {}
+          if (!ym || !ym.get) return null;
+          return keys.every(k => { const e = ym.get(k); return !!(e && e.deleted === true); });
+        }, { keys: targetKeys }).catch(() => null);
+      }
+    }
+    const roomOk = !targetKeys.length || !!(roomTombstones && roomTombstones.ok && roomTombstones.verified === true);
+    const deleted = (!!r.deleted || !r.existed) && storeConfirmed !== false && roomOk;
     return {
       ok: deleted,
       deleted: !!r.deleted,
       storeConfirmed,
+      folder: isFolder,
+      childrenConfirmed: isFolder ? childrenChecked : undefined,
+      roomTombstones,
       path,
-      error: r.error || (!r.deleted ? undefined
-        : (storeConfirmed === false ? 'row removed from the tree but the editor src store still lists this path — re-check or retry' : undefined)),
-      hint: deleted ? 'staged in the editor store; visitors see it once the generator owner saves' : undefined,
+      error: r.error || (!deleted
+        ? (storeConfirmed === false ? 'row removed from the tree but the editor src store still lists this path — re-check or retry'
+          : (!roomOk ? 'local delete done but the room registry tombstones did not stick — the delete would not survive the owner save; retry' : undefined))
+        : undefined),
+      hint: deleted ? 'staged in the editor store AND tombstoned in the room registry; visitors see it once the generator owner saves' : undefined,
     };
   }
 
